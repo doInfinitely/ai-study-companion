@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Live2D Dense Glossary</title>
+    <style>
+      html, body { margin:0; height:100%; background:#111; }
+      canvas#stage { width:100vw; height:100vh; display:block; }
+      .panel {
+        position:fixed; background:rgba(0,0,0,0.6); color:#eee;
+        border-radius:10px; padding:10px; width:420px;
+        font:12px system-ui,-apple-system,Segoe UI,Roboto;
+        z-index:10070; user-select:none; box-shadow:0 6px 16px rgba(0,0,0,0.35);
+      }
+      .panel h3 { margin:0 0 8px 0; font-size:13px; }
+      .row { display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #222; }
+      .btn { padding:4px 8px; border:1px solid #444; border-radius:6px; background:#1b1b1b; color:#ddd; cursor:pointer; }
+      .btn:hover { background:#262626; }
+      .btn.active { background:#333377; border-color:#5560c9; }
+      .field { padding:6px; border-radius:6px; border:1px solid #444; background:#111; color:#ddd; }
+      .switch { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+      .small { opacity:.8; font-size:11px; }
+      .twocol { display:flex; gap:8px; flex-wrap:wrap; }
+      .linkbar { position:fixed; left:10px; top:10px; z-index:10080; }
+      .linkbar a { color:#bcd; text-decoration:none; padding:6px 10px; border:1px solid #444; border-radius:8px; background:#1b1b1b; }
+      .linkbar a:hover{ background:#262626; }
+    </style>
+  </head>
+  <body>
+    <div class="linkbar"><a href="/index.html">Back to Controls</a></div>
+    <canvas id="stage"></canvas>
+
+    <!-- Cubism Core -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Pixi v6 -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.2/dist/browser/pixi.min.js"></script>
+    <!-- pixi-live2d-display (cubism4) -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <script>
+      (async function(){
+        'use strict';
+
+        // ---------- small utils ----------
+        window.PIXI = PIXI;
+        function next2(){ return new Promise(function(r){ requestAnimationFrame(function(){ requestAnimationFrame(r); }); }); }
+        function clamp(x,a,b){ return Math.max(a, Math.min(b, x)); }
+        function makeDraggable(el, pos){
+          var x = (pos && pos.x!=null)?pos.x:10, y=(pos&&pos.y!=null)?pos.y:10;
+          el.style.left=x+'px'; el.style.top=y+'px'; el.style.right='auto';
+          var sx=0, sy=0, ox=0, oy=0, moving=false;
+          function isCtl(t){ t=(t||'').toLowerCase(); return t==='input'||t==='button'||t==='select'||t==='textarea'||t==='option'||t==='label'; }
+          function down(e){ var tag=(e.target.tagName||''); if(isCtl(tag)) return;
+            moving=true; var p=('touches' in e)?e.touches[0]:e; sx=p.clientX; sy=p.clientY; ox=parseInt(el.style.left||'0',10); oy=parseInt(el.style.top||'0',10); e.preventDefault(); }
+          function move(e){ if(!moving) return; var p=('touches' in e)?e.touches[0]:e; el.style.left=(ox+(p.clientX-sx))+'px'; el.style.top=(oy+(p.clientY-sy))+'px'; }
+          function up(){ moving=false; }
+          el.addEventListener('mousedown',down); el.addEventListener('touchstart',down,{passive:false});
+          window.addEventListener('mousemove',move); window.addEventListener('touchmove',move,{passive:false});
+          window.addEventListener('mouseup',up); window.addEventListener('touchend',up);
+        }
+
+        // ---------- PIXI + model ----------
+        var app = new PIXI.Application({ view: document.getElementById('stage'), resizeTo: window, backgroundAlpha: 0, antialias: true });
+        var Live2DModel = PIXI.live2d.Live2DModel;
+        var model = await Live2DModel.from('/models/MO.v2.6.2/MO.model3.json');
+        app.stage.addChild(model);
+
+        // fit
+        function screen(){ return { w: app.renderer.screen.width, h: app.renderer.screen.height }; }
+        async function clampFit(){
+          model.anchor.set(0.5,0.5); model.scale.set(1);
+          var s=screen(); model.position.set(s.w/2, s.h/2); await next2();
+          var sc=model.scale.x, i=0;
+          for(i=0;i<60;i++){
+            await next2();
+            if(model.width<=s.w*0.72 && model.height<=s.h*0.72) break;
+            sc=Math.max(0.05, sc*0.85); model.scale.set(sc);
+          }
+          await next2();
+          var mw=model.width, mh=model.height;
+          model.position.set(s.w/2, Math.max(mh/2+32, s.h - mh/2 - 32));
+        }
+        await clampFit(); addEventListener('resize', clampFit);
+
+        // idle sway
+        app.ticker.add(function(){ var t=performance.now()*0.001; model.internalModel.coreModel.setParameterValueById('ParamAngleZ', Math.sin(t)*5); });
+
+        await next2();
+        var core = model.internalModel.coreModel;
+
+        // ---------- enumerate params (robust) ----------
+        async function enumerateParamsRobust(){
+          await next2();
+          var c=core;
+          if (typeof c.getParameterCount==='function' && typeof c.getParameterId==='function'){
+            var n=c.getParameterCount(), out=[], i;
+            for(i=0;i<n;i++){
+              var id=String(c.getParameterId(i));
+              var min=(c.getParameterMinimumValue&&c.getParameterMinimumValue(i)!=null)?c.getParameterMinimumValue(i):-10;
+              var max=(c.getParameterMaximumValue&&c.getParameterMaximumValue(i)!=null)?c.getParameterMaximumValue(i):10;
+              var def=(c.getParameterDefaultValue&&c.getParameterDefaultValue(i)!=null)?c.getParameterDefaultValue(i):0;
+              var val=c.getParameterValueById?c.getParameterValueById(id):0;
+              out.push({ id:id, min:min, max:max, value:val, "default":def });
+            }
+            return out;
+          }
+          var ids=c._parameterIds||c.parameterIds||null;
+          var mins=c._parameterMinimumValues||c.parameterMinimumValues||null;
+          var maxs=c._parameterMaximumValues||c.parameterMaximumValues||null;
+          var defs=c._parameterDefaultValues||c.parameterDefaultValues||null;
+          var vals=c._parameterValues||c.parameterValues||null;
+          if (Array.isArray(ids)&&ids.length){
+            var out2=[], j;
+            for(j=0;j<ids.length;j++){
+              out2.push({ id:String(ids[j]), min: mins?mins[j]:-10, max: maxs?maxs[j]:10, value: vals?vals[j]:0, "default": defs?defs[j]:0 });
+            }
+            return out2;
+          }
+          var FALLBACK=['ParamAngleX','ParamAngleY','ParamAngleZ','ParamEyeLOpen','ParamEyeROpen','ParamEyeBallX','ParamEyeBallY','ParamMouthForm','ParamMouthOpenY','ParamMouthSmile','ParamBodyAngleX','ParamBodyAngleY','ParamBodyAngleZ','ParamControllerON'];
+          var out3=[], k;
+          for(k=0;k<FALLBACK.length;k++){
+            var id2=FALLBACK[k]; var vv=c.getParameterValueById?c.getParameterValueById(id2):0;
+            out3.push({ id:id2, min:-1, max:1, value:vv, "default":0 });
+          }
+          return out3;
+        }
+
+        // ---------- snapshots & sticky overrides ----------
+        var desiredParam = new Map();
+        var neutralLock = true;
+        function clearOverrides(){ desiredParam.clear(); }
+        app.ticker.add(function(){ desiredParam.forEach(function(v,id){ try{ core.setParameterValueById(id, v); }catch(e){} }); });
+
+        var paramsAtLoad = await enumerateParamsRobust();
+        var NEUTRAL = new Map(paramsAtLoad.map(function(p){ return [p.id, core.getParameterValueById(p.id)]; }));
+        var DEFAULTS = new Map(paramsAtLoad.map(function(p){ return [p.id, (p["default"]!=null?p["default"]:0)]; }));
+
+        // ---------- expressions ----------
+        async function loadExpressions(base){
+          base = base || '/models/MO.v2.6.2';
+          var list = [
+            "\\uFF1F\\uFF1F.exp3.json","D.exp3.json","huahua.exp3.json","lunpan.exp3.json","S.exp3.json","wuyu.exp3.json",
+            "A.exp3.json","dianji.exp3.json","jushou.exp3.json","pc.exp3.json","shengqi.exp3.json","xiangkuang.exp3.json",
+            "aixin.exp3.json","E.exp3.json","liuhan.exp3.json","pcshubiao.exp3.json","shoubin.exp3.json","xingxing.exp3.json",
+            "changge.exp3.json","F.exp3.json","lunpan emoji.exp3.json","Q.exp3.json","space.exp3.json","youjian.exp3.json",
+            "CTRL.exp3.json","guihuo.exp3.json","lunpan shoushi.exp3.json","R.exp3.json","W.exp3.json","Z.exp3.json"
+          ];
+          var em = (model.internalModel && model.internalModel.motionManager && (model.internalModel.motionManager.expressionManager || model.internalModel.motionManager._expressionManager)) || null;
+          var store = new Map(); var names=[], i;
+          for(i=0;i<list.length;i++){
+            var file=list[i], name=file.replace(/\.exp3\.json$/i,'');
+            var url=base+'/expressions/'+encodeURIComponent(file);
+            try{
+              var res=await fetch(url,{cache:'no-cache'}); if(!res.ok) continue;
+              var json=await res.json();
+              if(em && typeof em.addExpression==='function'){ try{ em.addExpression(name,json); }catch(e){} }
+              store.set(name,json); names.push(name);
+            }catch(e){}
+          }
+          model.__expressions=store;
+          return names;
+        }
+        function tweenPairsSticky(pairs, duration){
+          var t0=performance.now(); var dur=(duration!=null)?duration:420;
+          function tick(now){
+            var t=Math.min(1,(now-t0)/dur), k=t*(2-t), i;
+            for(i=0;i<pairs.length;i++){
+              var p=pairs[i]; var v=p.start+(p.end-p.start)*k;
+              try{ core.setParameterValueById(p.id,v); }catch(e){}
+              desiredParam.set(p.id,v);
+            }
+            if(t<1) requestAnimationFrame(tick);
+          }
+          requestAnimationFrame(tick);
+        }
+        function buildPairsFromExpression(expJson, mult){
+          var arr=(expJson&& (expJson.Parameters||expJson.parameters))||[];
+          var out=[], i;
+          var m=(mult!=null)?mult:1.6;
+          for(i=0;i<arr.length;i++){
+            var p=arr[i]; var id=p.Id||p.id;
+            var blend=String(p.Blend||p.blend||'Add').toLowerCase();
+            var delta=Number(p.Value!=null?p.Value:(p.value!=null?p.value:0))*m;
+            var start=core.getParameterValueById(id); var end;
+            if(blend==='add') end=start+delta;
+            else if(blend==='multiply') end=start*delta;
+            else end=delta;
+            out.push({id:id,start:start,end:end});
+          }
+          return out;
+        }
+        function buildPairsToTargets(ids, targetMap){
+          var out=[], i;
+          for(i=0;i<ids.length;i++){
+            var id=ids[i]; var start=core.getParameterValueById(id); var end=targetMap.has(id)?targetMap.get(id):start;
+            out.push({id:id,start:start,end:end});
+          }
+          return out;
+        }
+
+        // ---------- expression panel ----------
+        var activeExpressions = new Map();
+        function mountExpressionPanel(names){
+          var old=document.getElementById('expr-panel'); if(old) old.remove();
+          var el=document.createElement('div'); el.className='panel'; el.id='expr-panel';
+          el.innerHTML='' +
+            '<h3>Expressions (toggle)</h3>' +
+            '<div style="margin:6px 0;">' +
+              '<label style="opacity:.8">Intensity</label>' +
+              '<input id="expr-int" class="field" type="range" min="0.5" max="3" step="0.1" value="1.6" style="width:160px;vertical-align:middle">' +
+              '<span id="expr-int-val" class="small" style="margin-left:6px;">1.6x</span>' +
+            '</div>' +
+            '<div id="expr-buttons" style="display:flex;flex-wrap:wrap;gap:6px;"></div>';
+          document.body.appendChild(el);
+          el.style.top='46px'; el.style.left='10px'; makeDraggable(el,{x:10,y:46});
+
+          var wrap=el.querySelector('#expr-buttons');
+          var intensityEl=el.querySelector('#expr-int');
+          var intensityVal=el.querySelector('#expr-int-val');
+          intensityEl.oninput=function(){ intensityVal.textContent=String(parseFloat(intensityEl.value).toFixed(1))+'x'; };
+
+          function setBtn(b,on){ if(on) b.classList.add('active'); else b.classList.remove('active'); }
+
+          var i;
+          for(i=0;i<names.length;i++){
+            (function(name){
+              var btn=document.createElement('button'); btn.className='btn'; btn.textContent=name; setBtn(btn,false);
+              btn.onclick=function(){
+                var exp=model.__expressions && model.__expressions.get ? model.__expressions.get(name) : null;
+                if(!exp) return;
+                var mult=parseFloat(intensityEl.value||'1.6');
+                if(activeExpressions.has(name)){
+                  var ids=Array.from(activeExpressions.get(name));
+                  var pairs = neutralLock ? buildPairsToTargets(ids, NEUTRAL) : buildPairsToTargets(ids, new Map(ids.map(function(id){ return [id, core.getParameterValueById(id)]; })));
+                  tweenPairsSticky(pairs, 380);
+                  if(neutralLock){ for(var j=0;j<ids.length;j++){ desiredParam.set(ids[j], NEUTRAL.get(ids[j])); } }
+                  else{ for(var j2=0;j2<ids.length;j2++){ desiredParam.delete(ids[j2]); } }
+                  activeExpressions.delete(name); setBtn(btn,false);
+                } else {
+                  var pairs2=buildPairsFromExpression(exp, mult);
+                  var ids2=pairs2.map(function(p){ return p.id; });
+                  activeExpressions.set(name, new Set(ids2));
+                  tweenPairsSticky(pairs2, 420);
+                  setBtn(btn,true);
+                }
+              };
+              wrap.appendChild(btn);
+            })(names[i]);
+          }
+        }
+
+        // ---------- params panel ----------
+        function mountParamsPanel(params){
+          var old=document.getElementById('params-panel'); if(old) old.remove();
+          var el=document.createElement('div'); el.className='panel'; el.id='params-panel'; el.style.width='460px';
+          el.innerHTML='' +
+            '<h3 style="display:flex;align-items:center;gap:8px;justify-content:space-between;">' +
+              '<span>Parameters</span>' +
+              '<span class="twocol" style="justify-content:flex-end;">' +
+                '<label class="switch"><input id="pp-lock" type="checkbox" checked> <span>Neutral Lock</span></label>' +
+                '<button id="pp-neutral" class="btn">Set Neutral</button>' +
+                '<button id="pp-default" class="btn">Set Defaults</button>' +
+                '<button id="pp-clear" class="btn">Clear Overrides</button>' +
+              '</span>' +
+            '</h3>' +
+            '<div class="twocol" style="margin:8px 0;">' +
+              '<input id="pp-filter" class="field" placeholder="filter (e.g. Mouth, Eye, Controller)" style="flex:1;">' +
+              '<button id="pp-reload" class="btn">Reload Params</button>' +
+            '</div>' +
+            '<div id="pp-list" style="max-height:44vh; overflow:auto;"></div>';
+          document.body.appendChild(el);
+          el.style.top='46px'; el.style.right='10px'; makeDraggable(el,{x:window.innerWidth-500,y:46});
+
+          var filterEl=el.querySelector('#pp-filter');
+          var listEl  =el.querySelector('#pp-list');
+
+          el.querySelector('#pp-lock').onchange=function(e){ neutralLock=!!e.target.checked; };
+
+          function setAllFromMap(map, sticky){
+            map.forEach(function(v,id){
+              try{ core.setParameterValueById(id, v); }catch(e){}
+              if(sticky) desiredParam.set(id, v);
+            });
+          }
+
+          el.querySelector('#pp-neutral').onclick=function(){ setAllFromMap(NEUTRAL, true); };
+          el.querySelector('#pp-default').onclick=function(){ clearOverrides(); setAllFromMap(DEFAULTS, false); };
+          el.querySelector('#pp-clear').onclick=function(){ clearOverrides(); };
+          el.querySelector('#pp-reload').onclick=async function(){ var fresh=await enumerateParamsRobust(); buildList(fresh); };
+
+          function makeSliderRow(p){
+            var row=document.createElement('div'); row.className='row';
+            var label=document.createElement('div');
+            label.style.cssText='width:220px; font-family:ui-monospace,Menlo,monospace; overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            label.textContent=p.id;
+
+            var val=document.createElement('input'); val.type='range'; val.min=String(p.min); val.max=String(p.max);
+            var span=p.max-p.min; val.step=(span>3)?'0.01':(span>1?'0.005':'0.001');
+            var cur=core.getParameterValueById?p.value:0; // p.value is from enumeration at load
+            cur = core.getParameterValueById ? core.getParameterValueById(p.id) : (p.value||0);
+            val.value=String(cur); val.className='field'; val.style.flex='1';
+
+            var read=document.createElement('div'); read.style.cssText='width:56px; text-align:right; font-variant-numeric:tabular-nums;'; read.textContent=Number(cur).toFixed(2);
+
+            val.oninput=function(){ var v=parseFloat(val.value); desiredParam.set(p.id, v); try{ core.setParameterValueById(p.id, v); }catch(e){} read.textContent=v.toFixed(2); };
+            label.title='Double-click to clear sticky override for this param';
+            label.ondblclick=function(){ desiredParam.delete(p.id); var now=core.getParameterValueById?core.getParameterValueById(p.id):(p.value||0); val.value=String(now); read.textContent=Number(now).toFixed(2); };
+
+            row.appendChild(label); row.appendChild(val); row.appendChild(read); return row;
+          }
+
+          function buildList(arr){
+            var q=(filterEl.value||'').toLowerCase(); listEl.innerHTML='';
+            var i;
+            for(i=0;i<arr.length;i++){ var p=arr[i]; if(q && p.id.toLowerCase().indexOf(q)===-1) continue; listEl.appendChild(makeSliderRow(p)); }
+            if(!listEl.children.length){ var empty=document.createElement('div'); empty.style.opacity=0.8; empty.style.padding='8px 0'; empty.textContent='No parameters found (try Reload Params or clear the filter).'; listEl.appendChild(empty); }
+          }
+
+          buildList(params);
+          filterEl.oninput=function(){ buildList(params); };
+        }
+
+        // ---------- dense glossary panel ----------
+        function mountDenseGlossary(){
+          var el=document.createElement('div'); el.className='panel'; el.id='dense-glossary-panel'; el.style.width='520px';
+          el.innerHTML='' +
+            '<h3>Dense Glossary Builder</h3>' +
+            '<div class="twocol" style="margin-top:6px;">' +
+              '<label>Samples/param</label><input id="dg-samples" class="field" type="number" min="5" max="101" step="2" value="31" style="width:80px">' +
+              '<label>Downscale</label><input id="dg-down" class="field" type="number" min="64" max="256" step="16" value="128" style="width:80px">' +
+              '<label>MAD thr Neutral</label><input id="dg-thn" class="field" type="number" min="1" max="60" step="1" value="8" style="width:80px">' +
+              '<label>MAD thr Step</label><input id="dg-ths" class="field" type="number" min="1" max="60" step="1" value="6" style="width:80px">' +
+              '<label>Dwell (ms)</label><input id="dg-dwell" class="field" type="number" min="0" step="25" value="150" style="width:100px">' +
+            '</div>' +
+            '<div class="twocol" style="margin-top:6px;"><input id="dg-allow" class="field" placeholder="Whitelist regex (e.g. (Eye|Mouth|Brow|Angle|Controller))" style="flex:1;"></div>' +
+            '<div class="twocol" style="margin-top:6px; align-items:center;">' +
+              '<label class="switch"><input id="dg-embed" type="checkbox" checked> <span>Embed PNGs</span></label>' +
+              '<label class="switch"><input id="dg-useai" type="checkbox"> <span>Use OpenAI</span></label>' +
+              '<input id="dg-key" class="field" type="password" placeholder="OPENAI_API_KEY (optional)" style="flex:1;">' +
+            '</div>' +
+            '<div class="twocol" style="margin-top:8px;">' +
+              '<button id="dg-neutral" class="btn">Set Neutral</button>' +
+              '<button id="dg-default" class="btn">Set Defaults</button>' +
+              '<button id="dg-run" class="btn" style="background:#2b6;border-color:#194;">Build Dense Glossary</button>' +
+              '<button id="dg-stop" class="btn" style="background:#c44;border-color:#a22;" disabled>Stop</button>' +
+            '</div>' +
+            '<div id="dg-log" style="margin-top:8px;max-height:28vh;overflow:auto;background:#0a0a0a;padding:8px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap"></div>' +
+            '<div class="small" style="margin-top:6px;">Tip: start with 31 samples, MAD 8/6.</div>';
+          document.body.appendChild(el);
+          el.style.left='10px'; el.style.bottom='10px'; makeDraggable(el,{x:10,y:window.innerHeight-300});
+
+          function $(sel){ return el.querySelector(sel); }
+          function logAppend(msg){ var p=document.createElement('div'); p.textContent=msg; var log=$('#dg-log'); log.appendChild(p); log.scrollTop=log.scrollHeight; }
+
+          function makeSnap(down){
+            var cvs=document.createElement('canvas'); var ctx=cvs.getContext('2d', { willReadFrequently:true });
+            function snap(canvas){
+              var W=Math.max(32,(down|0)||128); var H=Math.max(32, Math.round(W*canvas.height/canvas.width));
+              cvs.width=W; cvs.height=H; ctx.drawImage(canvas,0,0,W,H); return ctx.getImageData(0,0,W,H);
+            }
+            function mad(a,b){
+              if(!a||!b||a.data.length!==b.data.length) return 1e9;
+              var A=a.data,B=b.data,s=0,n=0,i;
+              for(i=0;i<A.length;i+=4){ s+=Math.abs(A[i]-B[i])+Math.abs(A[i+1]-B[i+1])+Math.abs(A[i+2]-B[i+2]); n+=3; }
+              return s/n;
+            }
+            return { snap:snap, mad:mad };
+          }
+
+          async function grabPNG(canvas, maxW, maxH){
+            var w0=canvas.width, h0=canvas.height, w=w0, h=h0;
+            maxW=maxW||1024; maxH=maxH||1024;
+            if(w>maxW){ var s=maxW/w; w=Math.floor(w*s); h=Math.floor(h*s); }
+            if(h>maxH){ var s2=maxH/h; w=Math.floor(w*s2); h=Math.floor(h*s2); }
+            var off=document.createElement('canvas'); off.width=w; off.height=h;
+            off.getContext('2d').drawImage(canvas,0,0,w,h);
+            return off.toDataURL('image/png');
+          }
+
+          function segmentByDiff(samples, thNeutral, thStep){
+            var segs=[], cur=null, prev=null, i;
+            for(i=0;i<samples.length;i++){
+              var s=samples[i];
+              var changed=(s.dNeutral>=thNeutral)||(s.dStep>=thStep);
+              if(!cur){ cur={ start:s.t, items:[s] }; }
+              else {
+                var prevChanged=(prev.dNeutral>=thNeutral)||(prev.dStep>=thStep);
+                if(prevChanged!==changed){ cur.end=prev.t; segs.push(cur); cur={ start:s.t, items:[s] }; }
+                else { cur.items.push(s); }
+              }
+              prev=s;
+            }
+            if(cur){ cur.end=(prev?prev.t:1); segs.push(cur); }
+            var filtered=[], j;
+            for(j=0;j<segs.length;j++){
+              var seg=segs[j];
+              var maxN=0, maxS=0, k;
+              for(k=0;k<seg.items.length;k++){ if(seg.items[k].dNeutral>maxN) maxN=seg.items[k].dNeutral; if(seg.items[k].dStep>maxS) maxS=seg.items[k].dStep; }
+              if((maxN>=thNeutral)||(maxS>=thStep)) filtered.push(seg);
+            }
+            return filtered;
+          }
+
+          function representatives(seg){
+            if(!seg.items.length) return [];
+            var arr=seg.items.slice(); var first=arr[0], last=arr[arr.length-1];
+            var peak=arr[0], peakScore=-1, i;
+            for(i=0;i<arr.length;i++){
+              var s=arr[i]; var sc=s.dNeutral + 0.5*s.dStep;
+              if(sc>peakScore){ peak=s; peakScore=sc; }
+            }
+            var reps=[first];
+            if(peak!==first && peak!==last) reps.push(peak);
+            if(last!==first) reps.push(last);
+            reps.sort(function(a,b){ return a.t-b.t; });
+            return reps;
+          }
+
+          function freezeIdle(){
+            try{ var mm=model.internalModel.motionManager; if(mm && mm.stopAllMotions) mm.stopAllMotions(); }catch(e){}
+            var ids=['ParamBreath','ParamBodyAngleX','ParamBodyAngleY','ParamBodyAngleZ']; var i;
+            for(i=0;i<ids.length;i++){ try{ core.setParameterValueById(ids[i], 0); }catch(e){} }
+          }
+
+          $('#dg-neutral').onclick=function(){
+            NEUTRAL.forEach(function(v,id){ try{ core.setParameterValueById(id,v); }catch(e){} desiredParam.set(id,v); });
+            logAppend('Neutral applied (sticky).');
+          };
+          $('#dg-default').onclick=function(){
+            clearOverrides(); DEFAULTS.forEach(function(v,id){ try{ core.setParameterValueById(id,v); }catch(e){} });
+            logAppend('Defaults applied (not sticky).');
+          };
+
+          var running=false;
+          $('#dg-run').onclick=async function(){
+            var Nsamples=clamp((+$('#dg-samples').value|0),5,101);
+            var down=clamp((+$('#dg-down').value|0),64,256);
+            var thNeutral=+$('#dg-thn').value||8;
+            var thStep=+$('#dg-ths').value||6;
+            var dwell=+$('#dg-dwell').value||150;
+            var allowRe=($('#dg-allow').value||'').trim();
+            var allow=allowRe?new RegExp(allowRe,'i'):null;
+            var embed=$('#dg-embed').checked;
+            var useAI=$('#dg-useai').checked;
+            var apiKey=($('#dg-key').value||'').trim();
+
+            freezeIdle();
+            NEUTRAL.forEach(function(v,id){ try{ core.setParameterValueById(id,v); }catch(e){} desiredParam.set(id,v); });
+            await next2();
+
+            var all=await enumerateParamsRobust();
+            var params=all.filter(function(p){ return p.min!==p.max && (!allow || allow.test(p.id)); });
+            logAppend('Dense search over '+params.length+' params x '+Nsamples+' samples...');
+            running=true; $('#dg-run').disabled=true; $('#dg-stop').disabled=false;
+
+            var canvas=app.view; var snap=makeSnap(down);
+            var neutralImg=snap.snap(canvas); var neutralPNG=await grabPNG(canvas,1024,1024);
+
+            var result={ model3_url:(model.url||''), generated_at:(new Date()).toISOString(),
+              sampling:{ Nsamples:Nsamples, down:down, thNeutral:thNeutral, thStep:thStep, dwell:dwell }, parameters:[] };
+
+            var pi;
+            outer: for(pi=0; pi<params.length; pi++){
+              if(!running) break outer;
+              var p=params[pi];
+              var samples=[], prevImg=null, k;
+              for(k=0;k<Nsamples;k++){
+                if(!running) break outer;
+                var t=(Nsamples===1)?0.5:(k/(Nsamples-1));
+                var val=p.min+(p.max-p.min)*t;
+
+                NEUTRAL.forEach(function(v,id){ try{ core.setParameterValueById(id,v); }catch(e){} desiredParam.set(id,v); });
+                try{ core.setParameterValueById(p.id, val); }catch(e){}
+                desiredParam.set(p.id, val);
+
+                await next2(); if(dwell) await new Promise(function(r){ setTimeout(r,dwell); });
+
+                var curImg=snap.snap(canvas);
+                var dN=snap.mad(curImg, neutralImg);
+                var dS=prevImg ? snap.mad(curImg, prevImg) : dN;
+                var dataURL=null; if(embed || useAI) dataURL=await grabPNG(canvas,1024,1024);
+
+                samples.push({ t:+t.toFixed(4), value:+val.toFixed(4), dNeutral:+dN.toFixed(3), dStep:+dS.toFixed(3), png:dataURL });
+                prevImg=curImg;
+              }
+
+              var segsRaw=segmentByDiff(samples, thNeutral, thStep);
+              var segs=[], si;
+              for(si=0; si<segsRaw.length; si++){
+                var seg=segsRaw[si]; var reps=representatives(seg); var repsOut=[], ri;
+                for(ri=0; ri<reps.length; ri++){
+                  var r=reps[ri];
+                  repsOut.push({ t:r.t, value:r.value, dNeutral:r.dNeutral, dStep:r.dStep, png: embed ? r.png : undefined });
+                }
+                segs.push({ range:[seg.start, seg.end], representatives: repsOut });
+              }
+
+              if(useAI && apiKey){
+                async function describeDiff(neutralDataURL, variantDataURL, paramId, value){
+                  var res = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method:'POST',
+                    headers:{ 'Authorization':'Bearer '+apiKey, 'Content-Type':'application/json' },
+                    body:JSON.stringify({
+                      model:'gpt-4o-mini',
+                      temperature:0.2,
+                      messages:[{ role:'user', content:[
+                        { type:'text', text: 'Compare these images of the same Live2D character. Describe ONLY the visual change caused by altering a single parameter. Respond concisely (<=12 words) to complete: "'+paramId+' at '+value+': <difference>".' },
+                        { type:'image_url', image_url:{ url: neutralDataURL } },
+                        { type:'image_url', image_url:{ url: variantDataURL } }
+                      ]}]
+                    })
+                  });
+                  if(!res.ok) throw new Error('OpenAI '+res.status);
+                  var j=await res.json();
+                  var content=(j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content)||'';
+                  return content.trim();
+                }
+                var ssi, sri;
+                for(ssi=0; ssi<segs.length; ssi++){
+                  var seg2=segs[ssi];
+                  for(sri=0; sri<seg2.representatives.length; sri++){
+                    var rep=seg2.representatives[sri];
+                    try{
+                      var vpng=rep.png || await grabPNG(canvas,1024,1024);
+                      rep.description = await describeDiff(neutralPNG, vpng, p.id, rep.value);
+                    }catch(e){
+                      rep.description='(openai error) '+e.message;
+                    }
+                  }
+                }
+              }
+
+              result.parameters.push({ id:p.id, min:p.min, max:p.max, "default":p["default"], segments:segs,
+                notes: (segs.length?undefined:'no significant visual change at chosen thresholds') });
+              logAppend('OK '+p.id+': '+segs.length+' segment(s)');
+            }
+
+            var blob=new Blob([JSON.stringify(result,null,2)],{type:'application/json'});
+            var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='live2d_param_glossary_dense.json'; a.click();
+            setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1500);
+
+            running=false; $('#dg-run').disabled=false; $('#dg-stop').disabled=true; logAppend('Exported live2d_param_glossary_dense.json');
+          };
+
+          $('#dg-stop').onclick=function(){ running=false; $('#dg-run').disabled=false; $('#dg-stop').disabled=true; logAppend('Stopped'); };
+        } // end mountDenseGlossary (NOTE: no stray parenthesis)
+
+        // ---------- boot UI ----------
+        var exprNames = await loadExpressions('/models/MO.v2.6.2');
+        mountExpressionPanel(exprNames);
+        var params = await enumerateParamsRobust();
+        mountParamsPanel(params);
+        mountDenseGlossary();
+
+        console.log('Glossary ready. Expressions:', exprNames.length, 'Params:', params.length);
+      })();
+    </script>
+  </body>
+</html>
+

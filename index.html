@@ -8,7 +8,7 @@
       canvas#stage { width:100vw; height:100vh; display:block; }
       .panel {
         position:fixed; background:rgba(0,0,0,.6); color:#eee;
-        border-radius:10px; padding:10px; width:420px;
+        border-radius:10px; padding:10px; width:460px;
         font:12px system-ui,-apple-system,Segoe UI,Roboto;
         z-index:10070; user-select:none;
       }
@@ -16,10 +16,19 @@
       .row { display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid #222; }
       .btn { padding:4px 8px; border:1px solid #444; border-radius:6px; background:#1b1b1b; color:#ddd; cursor:pointer; }
       .btn:hover { background:#262626; }
+      .btn.primary { border-color:#5aa1ff; background:#1a2a44; }
+      .btn.copy-ok { background:#1d3b1d; border-color:#2b6a2b; }
       .btn.active { background:#333377; border-color:#5560c9; }
       .field { padding:6px; border-radius:6px; border:1px solid #444; background:#111; color:#ddd; }
       .switch { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
       .switch input { transform: translateY(1px); }
+      .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+      .small { font-size:11px; opacity:0.85; }
+      textarea.code {
+        width:100%; height:180px; background:#0b0b0b; color:#dcdcdc; border:1px solid #444;
+        border-radius:8px; padding:8px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px;
+        white-space:pre; overflow:auto;
+      }
     </style>
   </head>
   <body>
@@ -43,9 +52,9 @@
         function makeDraggable(el, {x=10, y=10} = {}) {
           el.style.left = x + 'px'; el.style.top = y + 'px'; el.style.right = 'auto';
           let sx=0, sy=0, ox=0, oy=0, moving=false;
+          const okTag = t => ['input','button','select','textarea','option','label'].includes((t||'').toLowerCase());
           const down = (e) => {
-            const t = e.target.tagName?.toLowerCase();
-            if (['input','button','select','textarea','option','label'].includes(t)) return;
+            if (okTag(e.target?.tagName)) return;
             moving = true;
             const p = ('touches' in e) ? e.touches[0] : e;
             sx=p.clientX; sy=p.clientY; ox=parseInt(el.style.left||'0',10); oy=parseInt(el.style.top||'0',10);
@@ -62,6 +71,22 @@
           window.addEventListener('touchmove', move, {passive:false});
           window.addEventListener('mouseup', up);
           window.addEventListener('touchend', up);
+        }
+        function downloadJSON(obj, name='parameter_glossary.json'){
+          const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        }
+        function downloadText(text, name='system_prompt_fragment.txt'){
+          const blob = new Blob([text], {type:'text/plain'});
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         }
 
         // ---------- PIXI + model ----------
@@ -176,17 +201,7 @@
           }));
         }
 
-        // ---------- snapshots & sticky overrides ----------
-        const desiredParam = new Map(); // sticky: id -> value
-        let neutralLock = true;         // when true, we lock to NEUTRAL if requested
-
-        function clearOverrides() { desiredParam.clear(); }
-        app.ticker.add(() => {
-          if (!desiredParam.size) return;
-          desiredParam.forEach((v, id) => { try { core.setParameterValueById(id, v); } catch {} });
-        });
-
-        // capture FULL neutral snapshot (all params) after placement
+        // capture snapshots
         const paramsAtLoad = await enumerateParamsRobust(model);
         const NEUTRAL = new Map(paramsAtLoad.map(p => [p.id, core.getParameterValueById(p.id)]));
         const DEFAULTS = new Map(paramsAtLoad.map(p => [p.id, p.default ?? 0]));
@@ -224,136 +239,25 @@
           return names;
         }
 
-        // tween helpers that ALSO write sticky overrides so overrides never fight expressions
-        function tweenPairsSticky(pairs, { duration = 420, easing = (t)=>t*(2-t), onDone } = {}) {
-          const t0 = performance.now();
-          function tick(now) {
-            const t = Math.min(1, (now - t0)/duration);
-            const k = easing(t);
-            for (const p of pairs) {
-              const v = p.start + (p.end - p.start) * k;
-              core.setParameterValueById(p.id, v);
-              desiredParam.set(p.id, v); // keep sticky aligned with tween
-            }
-            if (t < 1) requestAnimationFrame(tick);
-            else if (typeof onDone === 'function') onDone();
-          }
-          requestAnimationFrame(tick);
-        }
+        // ---------- Params panel ----------
+        const desiredParam = new Map();
+        let neutralLock = true;
+        app.ticker.add(() => {
+          if (!desiredParam.size) return;
+          desiredParam.forEach((v, id) => { try { core.setParameterValueById(id, v); } catch {} });
+        });
 
-        function buildPairsFromExpression(expJson, intensity = 1.6) {
-          const params = (expJson.Parameters || expJson.parameters || []);
-          const pairs = [];
-          for (const p of params) {
-            const id = p.Id || p.id;
-            const blend = (p.Blend || p.blend || "Add").toLowerCase();
-            const delta = Number(p.Value ?? p.value ?? 0) * intensity;
-            const start = core.getParameterValueById(id);
-            let end;
-            if (blend === "add")      end = start + delta;
-            else if (blend === "multiply") end = start * delta;
-            else end = delta;
-            pairs.push({ id, start, end });
-          }
-          return pairs;
-        }
-
-        function buildPairsToTargets(ids, targetMap) {
-          const pairs = [];
-          for (const id of ids) {
-            const start = core.getParameterValueById(id);
-            const end = targetMap.has(id) ? targetMap.get(id) : start;
-            pairs.push({ id, start, end });
-          }
-          return pairs;
-        }
-
-        // track which params each active expression controls
-        const activeExpressions = new Map(); // name -> Set(paramIds)
-
-        function mountExpressionPanel(names) {
-          const old = document.getElementById('expr-panel'); if (old) old.remove();
-          const el = document.createElement('div');
-          el.className = 'panel';
-          el.id = 'expr-panel';
-          el.innerHTML = `
-            <h3>Expressions (toggle)</h3>
-            <div style="margin:6px 0;">
-              <label style="opacity:.8">Intensity</label>
-              <input id="expr-int" class="field" type="range" min="0.5" max="3" step="0.1" value="1.6" style="width:160px;vertical-align:middle">
-              <span id="expr-int-val" style="margin-left:6px;opacity:.8">1.6×</span>
-            </div>
-            <div id="expr-buttons" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-          `;
-          document.body.appendChild(el);
-          el.style.top = '10px'; el.style.left = '10px'; el.style.right = 'auto';
-          makeDraggable(el, { x: 10, y: 10 });
-
-          const wrap = el.querySelector('#expr-buttons');
-          const intensityEl = el.querySelector('#expr-int');
-          const intensityVal = el.querySelector('#expr-int-val');
-          intensityEl.oninput = () => (intensityVal.textContent = `${parseFloat(intensityEl.value).toFixed(1)}×`);
-
-          function setBtnState(btn, on) { btn.classList.toggle('active', !!on); }
-
-          names.forEach(name => {
-            const btn = document.createElement('button');
-            btn.className = 'btn';
-            btn.textContent = name;
-            setBtnState(btn, false);
-            btn.onclick = () => {
-              const exp = model.__expressions?.get(name);
-              if (!exp) return;
-              const mult = parseFloat(intensityEl.value || '1.6');
-
-              if (activeExpressions.has(name)) {
-                // TURN OFF: animate back to neutral (if lock) or release sticky
-                const ids = Array.from(activeExpressions.get(name));
-                const target = neutralLock ? NEUTRAL : new Map(); // empty map => keep current and clear sticky
-                const pairs = neutralLock
-                  ? buildPairsToTargets(ids, NEUTRAL)
-                  : buildPairsToTargets(ids, new Map(ids.map(id => [id, core.getParameterValueById(id)])));
-                tweenPairsSticky(pairs, {
-                  duration: 380,
-                  onDone: () => {
-                    if (neutralLock) {
-                      // keep sticky at neutral for those ids
-                      ids.forEach(id => desiredParam.set(id, NEUTRAL.get(id)));
-                    } else {
-                      // clear sticky for those ids so motions can proceed
-                      ids.forEach(id => desiredParam.delete(id));
-                    }
-                  }
-                });
-                activeExpressions.delete(name);
-                setBtnState(btn, false);
-              } else {
-                // TURN ON: animate to expression and keep sticky in sync
-                const pairs = buildPairsFromExpression(exp, mult);
-                const ids = pairs.map(p => p.id);
-                activeExpressions.set(name, new Set(ids));
-                tweenPairsSticky(pairs, { duration: 420 });
-                setBtnState(btn, true);
-              }
-            };
-            wrap.appendChild(btn);
-          });
-        }
-
-        // ---------- Params panel (Set Neutral/Defaults + Neutral Lock switch) ----------
         function mountParamsPanel(params) {
           const old = document.getElementById('params-panel'); if (old) old.remove();
           const el = document.createElement('div');
           el.className = 'panel';
           el.id = 'params-panel';
-          el.style.width = '460px';
           el.innerHTML = `
             <h3 style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
               <span>Parameters</span>
               <span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                 <label class="switch" title="When ON, expression OFF snaps back & sticks to Neutral">
-                  <input id="pp-lock" type="checkbox" checked>
-                  <span>Neutral Lock</span>
+                  <input id="pp-lock" type="checkbox" checked><span>Neutral Lock</span>
                 </label>
                 <button id="pp-neutral" class="btn" title="Set all to neutral snapshot and STICKY until cleared">Set Neutral</button>
                 <button id="pp-default" class="btn" title="Set all to model defaults (one-shot)">Set Defaults</button>
@@ -364,7 +268,7 @@
               <input id="pp-filter" class="field" placeholder="filter (e.g. Mouth, Eye, Controller)" style="flex:1;">
               <button id="pp-reload" class="btn">Reload Params</button>
             </div>
-            <div id="pp-list" style="max-height:44vh; overflow:auto;"></div>
+            <div id="pp-list" style="max-height:38vh; overflow:auto;"></div>
           `;
           document.body.appendChild(el);
           el.style.top = '10px'; el.style.right = '10px'; el.style.left = 'auto';
@@ -387,18 +291,9 @@
             });
           }
 
-          $neutral.onclick = () => {
-            // sticky neutral: will hold even if motions/expressions run
-            setAllFromMap(NEUTRAL, { sticky: true });
-          };
-
-          $default.onclick = () => {
-            // write defaults once; do NOT make sticky so you can animate
-            clearOverrides();
-            setAllFromMap(DEFAULTS, { sticky: false });
-          };
-
-          $clear.onclick = () => { clearOverrides(); };
+          $neutral.onclick = () => { setAllFromMap(NEUTRAL, { sticky: true }); };
+          $default.onclick = () => { desiredParam.clear(); setAllFromMap(DEFAULTS, { sticky: false }); };
+          $clear.onclick = () => { desiredParam.clear(); };
 
           $reload.onclick = async () => {
             const fresh = await enumerateParamsRobust(model);
@@ -430,8 +325,8 @@
 
             val.oninput = () => {
               const v = parseFloat(val.value);
-              desiredParam.set(p.id, v);            // sticky per-param
-              core.setParameterValueById(p.id, v);  // immediate feedback
+              desiredParam.set(p.id, v);
+              core.setParameterValueById(p.id, v);
               read.textContent = v.toFixed(2);
             };
 
@@ -469,12 +364,242 @@
           $filter.oninput = () => buildList(params);
         }
 
+        // ---------- Expressions panel ----------
+        const activeExpressions = new Map(); // name -> Set(paramIds)
+        function mountExpressionPanel(names) {
+          const old = document.getElementById('expr-panel'); if (old) old.remove();
+          const el = document.createElement('div');
+          el.className = 'panel';
+          el.id = 'expr-panel';
+          el.innerHTML = `
+            <h3>Expressions (toggle)</h3>
+            <div style="margin:6px 0;">
+              <label style="opacity:.8">Intensity</label>
+              <input id="expr-int" class="field" type="range" min="0.5" max="3" step="0.1" value="1.6" style="width:160px;vertical-align:middle">
+              <span id="expr-int-val" class="small">1.6×</span>
+            </div>
+            <div id="expr-buttons" style="display:flex;flex-wrap:wrap;gap:6px;max-height:36vh;overflow:auto;"></div>
+          `;
+          document.body.appendChild(el);
+          el.style.top = '10px'; el.style.left = '10px'; el.style.right = 'auto';
+          makeDraggable(el, { x: 10, y: 10 });
+
+          const wrap = el.querySelector('#expr-buttons');
+          const intensityEl = el.querySelector('#expr-int');
+          const intensityVal = el.querySelector('#expr-int-val');
+          intensityEl.oninput = () => (intensityVal.textContent = `${parseFloat(intensityEl.value).toFixed(1)}×`);
+
+          function setBtnState(btn, on) { btn.classList.toggle('active', !!on); }
+
+          function buildPairsFromExpression(expJson, intensity = 1.6) {
+            const params = (expJson.Parameters || expJson.parameters || []);
+            const pairs = [];
+            for (const p of params) {
+              const id = p.Id || p.id;
+              const blend = (p.Blend || p.blend || "Add").toLowerCase();
+              const delta = Number(p.Value ?? p.value ?? 0) * intensity;
+              const start = core.getParameterValueById(id);
+              let end;
+              if (blend === "add") end = start + delta;
+              else if (blend === "multiply") end = start * delta;
+              else end = delta;
+              pairs.push({ id, start, end });
+            }
+            return pairs;
+          }
+
+          function tweenPairsSticky(pairs, { duration = 420, easing = (t)=>t*(2-t), onDone } = {}) {
+            const t0 = performance.now();
+            function tick(now) {
+              const t = Math.min(1, (now - t0)/duration);
+              const k = easing(t);
+              for (const p of pairs) {
+                const v = p.start + (p.end - p.start) * k;
+                core.setParameterValueById(p.id, v);
+                desiredParam.set(p.id, v);
+              }
+              if (t < 1) requestAnimationFrame(tick);
+              else if (typeof onDone === 'function') onDone();
+            }
+            requestAnimationFrame(tick);
+          }
+
+          names.forEach(name => {
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = name;
+            setBtnState(btn, false);
+            btn.onclick = () => {
+              const exp = model.__expressions?.get(name);
+              if (!exp) return;
+              const mult = parseFloat(intensityEl.value || '1.6');
+
+              if (activeExpressions.has(name)) {
+                const ids = Array.from(activeExpressions.get(name));
+                const pairs = ids.map(id => ({ id, start: core.getParameterValueById(id), end: NEUTRAL.get(id) }));
+                tweenPairsSticky(pairs, {
+                  duration: 380,
+                  onDone: () => { ids.forEach(id => desiredParam.set(id, NEUTRAL.get(id))); }
+                });
+                activeExpressions.delete(name);
+                setBtnState(btn, false);
+              } else {
+                const pairs = buildPairsFromExpression(exp, mult);
+                const ids = pairs.map(p => p.id);
+                activeExpressions.set(name, new Set(ids));
+                tweenPairsSticky(pairs, { duration: 420 });
+                setBtnState(btn, true);
+              }
+            };
+            wrap.appendChild(btn);
+          });
+        }
+
+        // ---------- Prompt Builder (glossary + system-prompt fragment) ----------
+        async function fetchGuideMarkdown(url = '/parameter_guide.md') {
+          try {
+            const res = await fetch(url, { cache: 'no-cache' });
+            if (!res.ok) throw new Error('not found');
+            const text = await res.text();
+            // very simple parser: sections like `## ParamX` then one paragraph description
+            const lines = text.split(/\r?\n/);
+            const map = new Map();
+            let cur = null, buf = [];
+            const flush = () => {
+              if (cur) { const desc = buf.join(' ').trim(); if (desc) map.set(cur, desc); }
+              cur = null; buf = [];
+            };
+            for (const ln of lines) {
+              const m = ln.match(/^##\s+([A-Za-z0-9_]+)\s*$/);
+              if (m) { flush(); cur = m[1]; continue; }
+              if (cur) buf.push(ln.trim());
+            }
+            flush();
+            return map;
+          } catch {
+            return new Map(); // fallback: no descriptions
+          }
+        }
+
+        function inferStep(p) {
+          const span = (p.max - p.min);
+          if (!isFinite(span) || span <= 0) return 0.01;
+          if (span >= 30) return 0.5;
+          if (span >= 10) return 0.1;
+          if (span >= 3)  return 0.05;
+          return 0.01;
+        }
+
+        function buildGlossary(params, descMap) {
+          return params.map(p => ({
+            id: p.id,
+            min: Number(p.min),
+            max: Number(p.max),
+            default: Number(p.default ?? 0),
+            step: inferStep(p),
+            description: (descMap.get(p.id) || '').trim()
+          }));
+        }
+
+        function buildSystemPromptFragment(glossary) {
+          const lines = [];
+          lines.push(
+`You control a Live2D avatar by adjusting numeric parameters.
+For each instruction, return a JSON object { "set": { "<ParamId>": <number>, ... } }.
+Only set parameters you need; values must be within [min, max].`
+          );
+          lines.push('');
+          lines.push('Parameter glossary (id — range — meaning):');
+          glossary.forEach(g => {
+            const note = g.description ? ` — ${g.description}` : '';
+            lines.push(`- ${g.id} — [${g.min}, ${g.max}] (default ${g.default}, step ~${g.step})${note}`);
+          });
+          lines.push('');
+          lines.push('If a parameter behaves like a toggle (piecewise/categorical), pick exact integer plateaus within the valid range.');
+          lines.push('Prefer subtle changes first; avoid moving head/eyes when the user asks for cosmetic changes unless explicitly requested.');
+          lines.push('When multiple disjoint assets are controlled by the same parameter across subranges, set the value into the subrange that matches the user request (e.g., horns vs ears vs wings).');
+          return lines.join('\n');
+        }
+
+        function mountPromptBuilder(params) {
+          const old = document.getElementById('prompt-panel'); if (old) old.remove();
+          const el = document.createElement('div');
+          el.className = 'panel';
+          el.id = 'prompt-panel';
+          el.innerHTML = `
+            <h3>Prompt Builder (Function-calling Guide)</h3>
+            <div class="small" style="margin-bottom:6px;">
+              Builds a JSON glossary from the model's parameter <span class="mono">min/max/default</span> and your <span class="mono">parameter_guide.md</span> annotations (if available).
+            </div>
+
+            <div style="display:flex;gap:8px;margin:6px 0;flex-wrap:wrap;">
+              <label class="small">Guide URL:</label>
+              <input id="pb-url" class="field mono" style="flex:1;" value="/parameter_guide.md" />
+              <button id="pb-build" class="btn primary">Build</button>
+              <button id="pb-clear" class="btn">Clear</button>
+            </div>
+
+            <div class="small" style="margin:6px 0;">Glossary JSON</div>
+            <textarea id="pb-json" class="code" placeholder="// click Build to generate"></textarea>
+            <div style="display:flex;gap:8px; margin:6px 0; flex-wrap:wrap;">
+              <button id="pb-copy-json" class="btn">Copy JSON</button>
+              <button id="pb-download-json" class="btn">Download JSON</button>
+            </div>
+
+            <div class="small" style="margin:8px 0 6px;">System-prompt fragment</div>
+            <textarea id="pb-prompt" class="code" placeholder="// will appear after Build"></textarea>
+            <div style="display:flex;gap:8px; margin:6px 0; flex-wrap:wrap;">
+              <button id="pb-copy-prompt" class="btn">Copy Prompt</button>
+              <button id="pb-download-prompt" class="btn">Download Prompt</button>
+            </div>
+          `;
+          document.body.appendChild(el);
+          el.style.bottom = '10px'; el.style.left = '10px'; el.style.top = 'auto';
+          makeDraggable(el, { x: 10, y: window.innerHeight - 420 });
+
+          const $url = el.querySelector('#pb-url');
+          const $build = el.querySelector('#pb-build');
+          const $clear = el.querySelector('#pb-clear');
+          const $json = el.querySelector('#pb-json');
+          const $prompt = el.querySelector('#pb-prompt');
+          const $copyJ = el.querySelector('#pb-copy-json');
+          const $dlJ = el.querySelector('#pb-download-json');
+          const $copyP = el.querySelector('#pb-copy-prompt');
+          const $dlP = el.querySelector('#pb-download-prompt');
+
+          function flash(btn) {
+            const was = btn.className;
+            btn.className = 'btn copy-ok';
+            setTimeout(() => btn.className = was, 600);
+          }
+
+          $build.onclick = async () => {
+            const guideMap = await fetchGuideMarkdown($url.value.trim() || '/parameter_guide.md');
+            // refresh params so min/max reflect current core
+            const fresh = await enumerateParamsRobust(model);
+            const glossary = buildGlossary(fresh, guideMap);
+            $json.value = JSON.stringify(glossary, null, 2);
+            $prompt.value = buildSystemPromptFragment(glossary);
+          };
+
+          $clear.onclick = () => { $json.value = ''; $prompt.value = ''; };
+
+          $copyJ.onclick = async () => { await navigator.clipboard.writeText($json.value || ''); flash($copyJ); };
+          $dlJ.onclick = () => { try { downloadJSON(JSON.parse($json.value||'[]')); } catch { downloadText($json.value||'[]', 'parameter_glossary.json'); } };
+
+          $copyP.onclick = async () => { await navigator.clipboard.writeText($prompt.value || ''); flash($copyP); };
+          $dlP.onclick = () => { downloadText($prompt.value || '', 'system_prompt_fragment.txt'); };
+        }
+
         // ---------- boot panels ----------
         const exprNames = await loadExpressions(model, "/models/MO.v2.6.2");
         mountExpressionPanel(exprNames);
 
         const params = await enumerateParamsRobust(model);
         mountParamsPanel(params);
+
+        // NEW: Prompt Builder (uses model min/max/default + your markdown guide)
+        mountPromptBuilder(params);
 
         console.log('Panels mounted. Expressions:', exprNames.length, 'Params:', params.length);
       })();

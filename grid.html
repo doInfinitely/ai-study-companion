@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live2D Parameter Grid Export</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html, body { margin:0; background:#0b0b0b; color:#eee; font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto; }
+    #ui {
+      position: fixed; inset: 10px auto auto 10px; z-index: 1000;
+      background: rgba(0,0,0,.6); border: 1px solid #333; border-radius: 10px;
+      padding: 10px; width: 420px; user-select: none;
+    }
+    #ui h3 { margin: 0 0 8px 0; font-size: 16px; }
+    .row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+    .field { padding:6px; border-radius:6px; border:1px solid #444; background:#111; color:#ddd; }
+    .btn { padding:8px 10px; border-radius:8px; border:1px solid #444; background:#1b1b1b; color:#ddd; cursor:pointer; }
+    .btn:hover { background:#262626; }
+    #log { white-space: pre-wrap; font:12px ui-monospace,Menlo,monospace; background:#0f0f0f; padding:8px; border-radius:8px; max-height: 38vh; overflow:auto; }
+    canvas#stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <!-- Control panel -->
+  <div id="ui">
+    <h3>Export Live2D Parameter Grid</h3>
+    <div class="row">
+      <label style="min-width:150px">Model path:</label>
+      <input id="modelPath" class="field" style="flex:1" value="/models/MO.v2.6.2/MO.model3.json">
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Columns / samples:</label>
+      <input id="cols" type="number" class="field" value="9" min="3" max="31" step="1" style="width:90px">
+      <span style="opacity:.8">linspace(min → max)</span>
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Cell size (w×h px):</label>
+      <input id="cellW" type="number" class="field" value="192" min="96" max="512" step="8" style="width:90px">
+      <input id="cellH" type="number" class="field" value="192" min="96" max="512" step="8" style="width:90px">
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Left gutter (px):</label>
+      <input id="gutter" type="number" class="field" value="300" min="140" max="600" step="10" style="width:100px">
+      <span style="opacity:.8">room for parameter name</span>
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Skip static params:</label>
+      <input id="skipStatic" type="checkbox" checked>
+      <span style="opacity:.8">auto-skip if no visible change vs neutral</span>
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Static MAD threshold:</label>
+      <input id="madThr" type="number" class="field" value="1.2" min="0" max="20" step="0.1" style="width:100px">
+      <span style="opacity:.8">0 = never skip</span>
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Rows per page (max):</label>
+      <input id="rowsPerPage" type="number" class="field" value="60" min="10" max="400" step="10" style="width:100px">
+      <span style="opacity:.8">prevents giant canvases</span>
+    </div>
+    <div class="row">
+      <label style="min-width:150px">Filter params (regex):</label>
+      <input id="filter" class="field" placeholder="e.g. (Eye|Mouth|Hair)|ParamControllerON" style="flex:1">
+    </div>
+    <div class="row">
+      <button id="btnLoad" class="btn">Load / Reload Model</button>
+      <button id="btnExport" class="btn">Export Grid</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <!-- Cubism Core first -->
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <!-- Pixi v6 -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.2/dist/browser/pixi.min.js"></script>
+  <!-- pixi-live2d-display cubism4 build (0.4.x) -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+  <script>
+    (async () => {
+      window.PIXI = PIXI;
+
+      const stageView = document.getElementById('stage');
+      const app = new PIXI.Application({
+        view: stageView, resizeTo: window, backgroundAlpha: 0, antialias: true,
+        powerPreference: "high-performance",
+      });
+
+      const logEl = document.getElementById('log');
+      const log = (...a) => { const s = a.join(' '); logEl.textContent += s + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(s); };
+
+      const nextFrame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const { Live2DModel } = PIXI.live2d;
+      let model = null;
+      let core = null;
+      let NEUTRAL = new Map();
+
+      function linspace(a, b, n) { if (n <= 1) return [a]; const step = (b - a) / (n - 1); return Array.from({length:n}, (_,i)=> a + i*step); }
+
+      // Robust param enumeration (works across core variants)
+      async function enumerateParamsRobust(model) {
+        await nextFrame();
+        const c = model.internalModel.coreModel;
+
+        if (typeof c.getParameterCount === "function" && typeof c.getParameterId === "function") {
+          const n = c.getParameterCount();
+          const items = [];
+          for (let i = 0; i < n; i++) {
+            const id  = String(c.getParameterId(i));
+            const min = c.getParameterMinimumValue?.(i) ?? -10;
+            const max = c.getParameterMaximumValue?.(i) ??  10;
+            const def = c.getParameterDefaultValue?.(i) ??  0;
+            const val = c.getParameterValueById?.(id) ?? 0;
+            items.push({ id, min, max, default: def, value: val });
+          }
+          return items;
+        }
+
+        const ids   = c._parameterIds   || c.parameterIds || null;
+        const mins  = c._parameterMinimumValues || c.parameterMinimumValues || null;
+        const maxs  = c._parameterMaximumValues || c.parameterMaximumValues || null;
+        const defs  = c._parameterDefaultValues || c.parameterDefaultValues || null;
+        const vals  = c._parameterValues || c.parameterValues || null;
+
+        if (Array.isArray(ids) && ids.length) {
+          const n = ids.length, out = [];
+          for (let i = 0; i < n; i++) {
+            out.push({
+              id: String(ids[i]),
+              min: mins ? mins[i] : -10,
+              max: maxs ? maxs[i] :  10,
+              default: defs ? defs[i] : 0,
+              value: vals ? vals[i] : 0
+            });
+          }
+          return out;
+        }
+
+        // fallback handful (shouldn't happen on Cubism 4)
+        const FALLBACK = [
+          'ParamAngleX','ParamAngleY','ParamAngleZ','ParamEyeLOpen','ParamEyeROpen',
+          'ParamEyeBallX','ParamEyeBallY','ParamMouthForm','ParamMouthOpenY','ParamMouthSmile',
+          'ParamBodyAngleX','ParamBodyAngleY','ParamBodyAngleZ','ParamBreath','ParamControllerON'
+        ];
+        return FALLBACK.map(id => ({
+          id, min:-1, max:1, default:0, value:c.getParameterValueById?.(id) ?? 0
+        }));
+      }
+
+      // Fit model into view (no idle sway, we want stable captures)
+      async function clampFit() {
+        model.anchor.set(0.5, 0.5);
+        model.scale.set(1);
+        model.position.set(app.renderer.screen.width/2, app.renderer.screen.height/2);
+        await nextFrame();
+        // optional: shrink if too large
+        let s = model.scale.x;
+        for (let i=0;i<60;i++) {
+          await nextFrame();
+          const mw = model.width, mh = model.height;
+          const sw = app.renderer.screen.width, sh = app.renderer.screen.height;
+          if (mw <= sw*0.72 && mh <= sh*0.72) break;
+          s = Math.max(0.05, s * 0.85);
+          model.scale.set(s);
+        }
+        await nextFrame();
+        // place slightly above bottom for symmetry
+        const mh2 = model.height;
+        model.position.set(app.renderer.screen.width/2, Math.max(mh2/2 + 32, app.renderer.screen.height - mh2/2 - 32));
+      }
+
+      // Utility: set specific param instantly
+      function setParam(id, v) { try { core.setParameterValueById(id, v); } catch {} }
+
+      // Render → return ImageBitmap (fast to draw)
+      async function captureBitmap(targetW, targetH) {
+        await nextFrame();
+        // use renderer view canvas as source, then scale when drawing to composite
+        const src = app.view;
+        // create bitmap for crisp scaling
+        return await createImageBitmap(src, { resizeWidth: targetW, resizeHeight: targetH, resizeQuality: "high" });
+      }
+
+      // Simple MAD (mean absolute difference) between two ImageData arrays
+      function madBetween(imgDataA, imgDataB) {
+        const a = imgDataA.data, b = imgDataB.data;
+        const n = Math.min(a.length, b.length);
+        let s = 0;
+        for (let i=0;i<n;i+=4) {
+          // luminance-ish absolute diff
+          const d = Math.abs(a[i]-b[i]) + Math.abs(a[i+1]-b[i+1]) + Math.abs(a[i+2]-b[i+2]);
+          s += d/3;
+        }
+        return s / (n/4); // average per pixel
+      }
+
+      // Capture ImageData for quick diff checks
+      function grabImageData(w, h) {
+        const temp = document.createElement('canvas');
+        temp.width = w; temp.height = h;
+        const tctx = temp.getContext('2d');
+        tctx.drawImage(app.view, 0, 0, w, h);
+        return tctx.getImageData(0, 0, w, h);
+      }
+
+      async function loadModel(path) {
+        if (model) { app.stage.removeChild(model); model.destroy({ children:true, texture:true, baseTexture:true }); model = null; }
+        log('Loading model:', path);
+        model = await Live2DModel.from(path);
+        app.stage.addChild(model);
+        await nextFrame();
+        core = model.internalModel.coreModel;
+
+        await clampFit();
+        await nextFrame();
+
+        // Freeze obvious idle sources to stabilize captures
+        const freezeList = ['ParamBreath','ParamAngleX','ParamAngleY','ParamAngleZ','ParamEyeBallX','ParamEyeBallY'];
+        freezeList.forEach(id => { if (typeof core.getParameterValueById === 'function') try { setParam(id, 0); } catch {} });
+
+        // Snapshot truly neutral AFTER placement
+        const params = await enumerateParamsRobust(model);
+        NEUTRAL = new Map(params.map(p => [p.id, core.getParameterValueById(p.id)]));
+        log('Model ready. Params:', params.length);
+        return params;
+      }
+
+      async function exportGrid() {
+        const modelPath  = document.getElementById('modelPath').value.trim();
+        const COLS       = Math.max(3, parseInt(document.getElementById('cols').value || '9', 10));
+        const CELL_W     = Math.max(64, parseInt(document.getElementById('cellW').value || '192', 10));
+        const CELL_H     = Math.max(64, parseInt(document.getElementById('cellH').value || '192', 10));
+        const GUTTER     = Math.max(120, parseInt(document.getElementById('gutter').value || '300', 10));
+        const rowsPerPg  = Math.max(10, parseInt(document.getElementById('rowsPerPage').value || '60', 10));
+        const skipStatic = document.getElementById('skipStatic').checked;
+        const madThr     = parseFloat(document.getElementById('madThr').value || '1.2');
+        const filterRx   = document.getElementById('filter').value.trim();
+        const rx = filterRx ? new RegExp(filterRx, 'i') : null;
+
+        const PAD_X = 10, PAD_Y = 10, LABEL_H = 18;
+
+        const allParams = await loadModel(modelPath);
+        // Filter parameter list if regex provided
+        const params = rx ? allParams.filter(p => rx.test(p.id)) : allParams;
+
+        // Pre-capture a neutral reference at cell size (for MAD skipping)
+        // Reset everything to NEUTRAL
+        params.forEach(p => setParam(p.id, NEUTRAL.get(p.id)));
+        const neutralRef = grabImageData(CELL_W, CELL_H);
+
+        // Determine which params to include (optional skip)
+        const included = [];
+        for (const p of params) {
+          setParam(p.id, NEUTRAL.get(p.id)); // reset
+          // Jitter a bit from neutral toward extremes to quickly test visibility
+          const probeVals = [
+            p.min, (p.min*2 + NEUTRAL.get(p.id))/3, NEUTRAL.get(p.id), (p.max*2 + NEUTRAL.get(p.id))/3, p.max
+          ];
+          let maxMad = 0;
+          for (const v of probeVals) {
+            setParam(p.id, v);
+            await nextFrame();
+            const probe = grabImageData(CELL_W, CELL_H);
+            const m = madBetween(neutralRef, probe);
+            if (m > maxMad) maxMad = m;
+          }
+          // restore neutral for this param
+          setParam(p.id, NEUTRAL.get(p.id));
+          if (!skipStatic || maxMad >= madThr) {
+            included.push(p);
+          }
+          log(`Probe ${p.id} → max MAD ${maxMad.toFixed(2)} ${(!skipStatic || maxMad>=madThr) ? 'KEEP' : 'SKIP'}`);
+        }
+        if (!included.length) { alert('No parameters selected for export (all looked static under current threshold/filter).'); return; }
+
+        // Paging to avoid huge canvases
+        const pages = [];
+        for (let start=0; start<included.length; start += rowsPerPg) {
+          const batch = included.slice(start, start + rowsPerPg);
+          const ROWS = batch.length;
+          const W = GUTTER + PAD_X + COLS * (CELL_W + PAD_X);
+          const H = PAD_Y + ROWS * (CELL_H + LABEL_H + PAD_Y);
+
+          const pageCanvas = document.createElement('canvas');
+          pageCanvas.width = W;
+          pageCanvas.height = H;
+          const ctx = pageCanvas.getContext('2d');
+          ctx.fillStyle = '#0b0b0b';
+          ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = '#eee';
+          ctx.font = '14px ui-monospace,Menlo,monospace';
+          ctx.textBaseline = 'top';
+
+          // For each parameter in this page
+          for (let r=0; r<batch.length; r++) {
+            const p = batch[r];
+            // Reset all params to NEUTRAL, then sweep only this param
+            for (const q of included) setParam(q.id, NEUTRAL.get(q.id));
+            await nextFrame();
+
+            // Row label
+            const y0 = PAD_Y + r * (CELL_H + LABEL_H + PAD_Y);
+            ctx.fillStyle = '#cfd3ff';
+            ctx.fillText(p.id, 10, y0 + Math.max(0, (CELL_H + LABEL_H - 14)/2));
+            ctx.fillStyle = '#eee';
+
+            const values = linspace(p.min, p.max, COLS);
+            for (let c=0; c<COLS; c++) {
+              const v = values[c];
+              setParam(p.id, v);
+              // also keep some obvious idle params frozen
+              setParam('ParamBreath', 0);
+              setParam('ParamAngleX', 0);
+              setParam('ParamAngleY', 0);
+              setParam('ParamAngleZ', 0);
+              await nextFrame();
+
+              // Capture and draw
+              const bmp = await captureBitmap(CELL_W, CELL_H);
+              const x = GUTTER + PAD_X + c * (CELL_W + PAD_X);
+              ctx.drawImage(bmp, x, y0, CELL_W, CELL_H);
+
+              // value label under image
+              ctx.fillStyle = '#ccc';
+              ctx.font = '12px ui-monospace,Menlo,monospace';
+              ctx.textAlign = 'center';
+              ctx.fillText(v.toFixed(3), x + CELL_W/2, y0 + CELL_H + 2);
+              ctx.textAlign = 'left';
+              ctx.font = '14px ui-monospace,Menlo,monospace';
+              ctx.fillStyle = '#eee';
+            }
+            log(`Rendered row: ${p.id}`);
+          }
+
+          pages.push(pageCanvas);
+        }
+
+        // Download pages
+        for (let i=0;i<pages.length;i++) {
+          const url = pages[i].toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `live2d_param_grid_p${i+1}_of_${pages.length}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          log(`Downloaded page ${i+1}/${pages.length}`);
+          await new Promise(r => setTimeout(r, 50));
+        }
+
+        log('Done.');
+      }
+
+      // Wire UI
+      document.getElementById('btnLoad').onclick = async () => {
+        await loadModel(document.getElementById('modelPath').value.trim());
+      };
+      document.getElementById('btnExport').onclick = exportGrid;
+
+      // Auto-load once
+      await loadModel(document.getElementById('modelPath').value.trim());
+    })();
+  </script>
+</body>
+</html>
+
