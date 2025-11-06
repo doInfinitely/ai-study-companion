@@ -107,19 +107,15 @@
         max-width: 900px;
         width: 100%;
         margin: 0 auto;
-        height: 100vh;
-        overflow: hidden;
       }
       
       .chat-messages {
         flex: 1;
         overflow-y: auto;
-        overflow-x: hidden;
         padding: 20px;
         display: flex;
         flex-direction: column;
         gap: 16px;
-        min-height: 0;
       }
       
       .message {
@@ -183,8 +179,6 @@
       .chat-input-area {
         border-top: 1px solid var(--border-color);
         padding: 20px;
-        flex-shrink: 0;
-        background: var(--bg-primary);
       }
       
       .input-container {
@@ -271,7 +265,6 @@
         color: var(--text-secondary);
         font-size: 13px;
         padding: 12px;
-        flex-shrink: 0;
       }
       
       .loading-indicator.active {
@@ -641,7 +634,7 @@
         </div>
         
         <div class="customize-control">
-          <label>Neck Accessory <span class="range-value" id="neckAccessoryValue">0</span></label>
+          <label>Neck Accessory <span class="range-value" id="neckValue">0</span></label>
           <input type="range" id="neckAccessory" min="0" max="4" value="0" step="1">
         </div>
         
@@ -672,21 +665,6 @@
         <div class="customize-control">
           <label>Right Hair <span class="range-value" id="rightHairValue">0</span></label>
           <input type="range" id="rightHair" min="0" max="14" value="0" step="1">
-        </div>
-        
-        <div class="customize-control">
-          <label>Back Hair <span class="range-value" id="backHairValue">0</span></label>
-          <input type="range" id="backHair" min="0" max="12" value="0" step="1">
-        </div>
-        
-        <div class="customize-control">
-          <label>Back Left Hair <span class="range-value" id="backLeftHairValue">0</span></label>
-          <input type="range" id="backLeftHair" min="0" max="6" value="0" step="1">
-        </div>
-        
-        <div class="customize-control">
-          <label>Back Right Hair <span class="range-value" id="backRightHairValue">0</span></label>
-          <input type="range" id="backRightHair" min="0" max="6" value="0" step="1">
         </div>
         
         <div class="customize-control">
@@ -919,10 +897,6 @@
             isInitial
           });
           
-          console.log('=== FRONTEND RESPONSE ===');
-          console.log('  data.conversationTitle:', data.conversationTitle);
-          console.log('  currentConversationId:', currentConversationId);
-          
           // Add assistant response
           addMessageToUI('assistant', data.response);
           
@@ -931,24 +905,8 @@
             await speakText(data.response);
           }
           
-          // Update title immediately if it changed
-          if (data.conversationTitle) {
-            console.log('✓ Updating title in UI to:', data.conversationTitle);
-            const conversationItem = document.querySelector(`[data-id="${currentConversationId}"]`);
-            console.log('  Found conversation item:', conversationItem);
-            if (conversationItem) {
-              conversationItem.textContent = data.conversationTitle;
-              console.log('  ✓ Updated item text');
-            } else {
-              console.log('  ✗ Could not find conversation item!');
-            }
-            // Reload full list to ensure it's sorted correctly and persisted
-            console.log('  Reloading conversation list...');
-            await loadConversations();
-          } else {
-            console.log('✗ No conversationTitle in response');
-          }
-          console.log('=== END FRONTEND ===');
+          // Update conversation list
+          await loadConversations();
         } catch (err) {
           console.error('Failed to send message:', err);
           addMessageToUI('system', 'Sorry, I encountered an error. Please try again.');
@@ -1380,9 +1338,6 @@
         leftHair: { id: 'Param102', range: [0, 14] },
         rightHair: { id: 'Param268', range: [0, 14] },
         ahoge: { id: 'Param19', range: [0, 10] },
-        backHair: { id: 'Param117', range: [0, 12] },
-        backLeftHair: { id: 'Param131', range: [0, 6] },
-        backRightHair: { id: 'Param134', range: [0, 6] },
         
         // Hair length & width
         centralHairLength: { id: 'Param5', range: [-1, 1] },

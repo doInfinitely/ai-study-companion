@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Live2D Speech + Planner + Emotions</title>
+    <style>
+      html, body { margin:0; height:100%; background:#111; overflow:hidden; }
+      canvas#stage { width:100vw; height:100vh; display:block; }
+      .panel {
+        position:fixed; background:rgba(0,0,0,.6); color:#eee;
+        border-radius:10px; padding:10px; width:560px; max-width:94vw;
+        font:12px system-ui,-apple-system,Segoe UI,Roboto;
+        z-index:10070; user-select:none; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+      }
+      .row { display:flex; align-items:center; gap:8px; padding:6px 0; flex-wrap:wrap; }
+      .btn { padding:6px 10px; border:1px solid #444; border-radius:6px; background:#1b1b1b; color:#ddd; cursor:pointer; }
+      .btn:hover { background:#262626; } .btn.primary { border-color:#5aa1ff; background:#1a2a44; }
+      .field { padding:6px; border-radius:6px; border:1px solid #444; background:#111; color:#ddd; }
+      .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+      .small { font-size:11px; opacity:0.9; }
+      textarea#sayText {
+        width:100%; height:68px; background:#0b0b0b; color:#dcdcdc; border:1px solid #444;
+        border-radius:8px; padding:8px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px;
+        white-space:pre-wrap; overflow:auto;
+      }
+      code.badge { background:#222; padding:2px 6px; border-radius:6px; border:1px solid #333; }
+      #status { white-space:pre-wrap }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+
+    <div id="ctrl" class="panel" style="left:10px; bottom:10px;">
+      <div class="row" style="padding-top:10px;">
+        <strong>Say Anything</strong>
+        <span class="small" style="opacity:.8">(Azure TTS → planner → emotions → amp mouth → auto-restore)</span>
+      </div>
+      <div class="row">
+        <textarea id="sayText" class="mono" placeholder="Type something the avatar should say…">Okay! Now I react with facial expressions while speaking, then relax.</textarea>
+      </div>
+      <div class="row">
+        <label class="small">Voice</label>
+        <input id="voice" class="field mono" style="flex:1; min-width:160px" value="en-US-JennyNeural" />
+        <label class="small">Backend</label>
+        <input id="backendUrl" class="field mono" style="width:230px" value="http://localhost:8787" />
+        <button id="sayBtn" class="btn primary">Say it</button>
+      </div>
+      <div class="row small" style="justify-content:space-between; width:100%;">
+        <div>Status: <span id="status"><code class="badge">Idle</code></span></div>
+        <div>
+          <button id="stopBtn" class="btn">Stop</button>
+          <button id="recenterBtn" class="btn">Recenter Model</button>
+        </div>
+      </div>
+      <div class="small" style="opacity:.8">Planner uses <code>public/parameter_catalog.txt</code> (loaded once, cached).</div>
+    </div>
+
+    <!-- Cubism Core -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Pixi v6 -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.2/dist/browser/pixi.min.js"></script>
+    <!-- pixi-live2d-display cubism4 -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+    <script>
+      (async () => {
+        const $ = s => document.querySelector(s);
+        const nextFrame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const setStatus = s => $('#status').innerHTML = `<code class="badge">${String(s)}</code>`;
+
+        function makeDraggable(el, {x=10, y=10} = {}) {
+          el.style.left = x + 'px'; el.style.bottom = y + 'px';
+          let sx=0, sy=0, ox=0, oy=0, moving=false;
+          const okTag = t => ['input','button','select','textarea','option','label'].includes((t||'').toLowerCase());
+          const down = e => { if (okTag(e.target?.tagName)) return;
+            moving = true; const p = 'touches' in e ? e.touches[0] : e;
+            sx=p.clientX; sy=p.clientY; ox=parseInt(el.style.left||'0',10); oy=parseInt(el.style.bottom||'0',10);
+            e.preventDefault();
+          };
+          const move = e => { if (!moving) return; const p='touches' in e?e.touches[0]:e;
+            el.style.left = (ox + (p.clientX - sx)) + 'px';
+            el.style.bottom = (oy - (p.clientY - sy)) + 'px';
+          };
+          const up = () => { moving=false; };
+          el.addEventListener('mousedown', down);
+          el.addEventListener('touchstart', down, {passive:false});
+          window.addEventListener('mousemove', move);
+          window.addEventListener('touchmove', move, {passive:false});
+          window.addEventListener('mouseup', up);
+          window.addEventListener('touchend', up);
+        }
+        makeDraggable($('#ctrl'), { x: 12, y: 12 });
+
+        async function postJson(url, body) {
+          const res = await fetch(url, {
+            method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+          });
+          const text = await res.text();
+          let json; try { json = JSON.parse(text); } catch { throw new Error(`Non-JSON (${res.status}): ${text}`); }
+          if (!res.ok || json.error) {
+            const detail = json.details || json.message || json.error || text;
+            throw new Error(`HTTP ${res.status}: ${typeof detail === 'string'? detail : JSON.stringify(detail)}`);
+          }
+          return json;
+        }
+
+        // ---------- PIXI + Live2D ----------
+        window.PIXI = PIXI;
+        const app = new PIXI.Application({ view: $('#stage'), resizeTo: window, backgroundAlpha: 0, antialias: true });
+        const { Live2DModel } = PIXI.live2d;
+        const model = await Live2DModel.from('/models/MO.v2.6.2/MO.model3.json');
+        app.stage.addChild(model);
+
+        const fitModel = async () => {
+          model.anchor.set(0.5, 0.5); model.scale.set(1);
+          const sw = app.renderer.screen.width, sh = app.renderer.screen.height;
+          model.position.set(sw/2, sh/2); await nextFrame();
+          let s = model.scale.x;
+          for (let i=0;i<60;i++){
+            await nextFrame(); const mw = model.width, mh = model.height;
+            if (mw <= sw*0.75 && mh <= sh*0.75) break;
+            s = Math.max(0.05, s * 0.85); model.scale.set(s);
+          }
+          await nextFrame();
+          const mw2 = model.width, mh2 = model.height;
+          model.position.set(sw/2, Math.max(mh2/2 + 32, sh - mh2/2 - 24));
+        };
+        await fitModel(); addEventListener('resize', () => fitModel());
+
+        const core = model.internalModel.coreModel;
+
+        // tiny idle sway
+        app.ticker.add(() => {
+          const t = performance.now() * 0.001;
+          try { core.setParameterValueById('ParamAngleZ', Math.sin(t) * 2.0); } catch {}
+        });
+
+        // ---------- snapshots / tween ----------
+        function snapshotParams(core) {
+          const map = new Map();
+          try {
+            const n = core.getParameterCount?.();
+            if (n && typeof core.getParameterId === 'function') {
+              for (let i=0;i<n;i++) {
+                const id = String(core.getParameterId(i));
+                map.set(id, core.getParameterValueById(id));
+              }
+              return map;
+            }
+          } catch {}
+          // Fallback: capture common motion + accessory params so we can restore.
+          [
+            // core motion
+            'ParamAngleX','ParamAngleY','ParamAngleZ',
+            'ParamBodyAngleX','ParamBodyAngleY','ParamBodyAngleZ',
+            'ParamEyeBallX','ParamEyeBallY',
+            'ParamEyeLOpen','ParamEyeROpen',
+            'ParamEyeLSmile','ParamEyeRSmile',
+            'ParamMouthForm','ParamMouthOpenY','ParamMouthSmile',
+            // common accessories/toggles seen in your glossary
+            'Param47','Param48',
+            'Param250','Param251','Param252','Param254','Param255','Param258'
+          ].forEach(id => {
+            try { map.set(id, core.getParameterValueById(id)); } catch {}
+          });
+          return map;
+        }
+
+        function tweenToSnapshot(core, targetMap, { duration = 420, easing = t => t*(2-t), onDone } = {}) {
+          const pairs = [];
+          targetMap.forEach((to, id) => {
+            try { const from = core.getParameterValueById(id); if (from !== to) pairs.push({id, from, to}); } catch {}
+          });
+          if (!pairs.length) { onDone?.(); return () => {}; }
+          let raf = 0; const t0 = performance.now();
+          const tick = now => {
+            const t = Math.min(1, (now - t0) / duration), k = easing(t);
+            for (const p of pairs) {
+              const v = p.from + (p.to - p.from) * k;
+              try { core.setParameterValueById(p.id, v); } catch {}
+            }
+            if (t < 1) raf = requestAnimationFrame(tick); else onDone?.();
+          };
+          raf = requestAnimationFrame(tick);
+          return () => cancelAnimationFrame(raf);
+        }
+
+        // ---------- Planner players ----------
+        function playFixedFpsTimeline(core, tl) {
+          const { dtMs, frames } = tl.fixedFps;
+          const start = performance.now(); let frameIdx = 0, raf = 0, stopped = false;
+          const apply = i => {
+            const f = frames[i] || {};
+            if ('ParamMouthOpenY' in f) delete f.ParamMouthOpenY;
+            for (const [id, val] of Object.entries(f)) { try { core.setParameterValueById(id, val); } catch {} }
+          };
+          const tick = () => {
+            if (stopped) return;
+            const idx = Math.floor((performance.now() - start) / dtMs);
+            if (idx !== frameIdx && idx < frames.length) { frameIdx = idx; apply(idx); }
+            if (idx >= frames.length - 1) return;
+            raf = requestAnimationFrame(tick);
+          };
+          apply(0); raf = requestAnimationFrame(tick);
+          return () => { stopped = true; cancelAnimationFrame(raf); };
+        }
+        function playKeyframesTimeline(core, tl) {
+          const kfs = (tl.keyframes || []).slice().sort((a,b)=>a.timeMs-b.timeMs);
+          if (!kfs.length) return () => {};
+          const start = performance.now(); let raf = 0, stopped = false;
+          const intervals = []; for (let i=0;i<kfs.length-1;i++) intervals.push([kfs[i], kfs[i+1]]);
+          const applyAt = tMs => {
+            let a = kfs[0], b = kfs[kfs.length-1];
+            for (const [k0,k1] of intervals) { if (tMs >= k0.timeMs && tMs <= k1.timeMs) { a = k0; b = k1; break; } }
+            const span = Math.max(1,(b.timeMs-a.timeMs)); const k = Math.min(1,Math.max(0,(tMs-a.timeMs)/span));
+            const keys = new Set([...Object.keys(a.params||{}), ...Object.keys(b.params||{})]);
+            keys.forEach(id => {
+              if (id === 'ParamMouthOpenY') return;
+              const va=(a.params||{})[id], vb=(b.params||{})[id];
+              if (typeof va==='number' && typeof vb==='number') {
+                const v = va + (vb - va) * k; try { core.setParameterValueById(id, v); } catch {}
+              } else if (typeof va==='number' && k<=0) { try { core.setParameterValueById(id, va); } catch {} }
+              else if (typeof vb==='number' && k>=1) { try { core.setParameterValueById(id, vb); } catch {} }
+            });
+          };
+          const tick = () => { if (stopped) return; applyAt(performance.now()-start); raf = requestAnimationFrame(tick); };
+          applyAt(0); raf = requestAnimationFrame(tick);
+          return () => { stopped = true; cancelAnimationFrame(raf); };
+        }
+
+        // ---------- Catalog ----------
+        let catalogText = '';
+        async function ensureCatalog() {
+          if (catalogText) return catalogText;
+          try { const res = await fetch('/parameter_catalog.txt', { cache:'no-cache' });
+            if (!res.ok) throw new Error('catalog not found'); catalogText = await res.text();
+          } catch { catalogText = ''; }
+          return catalogText;
+        }
+        await ensureCatalog();
+
+        // ---------- Mouth amplitude driver (UNCHANGED settings) ----------
+        class MouthAmplitudeDriver {
+          constructor(core, opts={}) {
+            const d = { paramId:'ParamMouthOpenY', gain:1.6, floor:0.012, attackMs:20, releaseMs:20, max:1.0, gamma:0.55 };
+            this.opt = Object.assign(d, opts);
+            this.core=core; this.ctx=null; this.src=null; this.hp=null; this.lp=null; this.an=null;
+            this.raf=0; this.running=false; this.prev=0; this.restoreTo=0;
+          }
+          async ensureContext(){ if(!this.ctx) this.ctx = new (window.AudioContext||window.webkitAudioContext)(); if(this.ctx.state==='suspended') await this.ctx.resume(); return this.ctx; }
+          async startFor(audioEl, restoreTo=0){
+            this.stop(); this.restoreTo=Number(restoreTo)||0;
+            const ctx = await this.ensureContext();
+            const src = this.src = ctx.createMediaElementSource(audioEl);
+            const hp = this.hp = ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=200; hp.Q.value=0.707;
+            const lp = this.lp = ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=3200; lp.Q.value=0.707;
+            const an = this.an = ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.4;
+            src.connect(ctx.destination); src.connect(hp); hp.connect(lp); lp.connect(an);
+            const buf = new Float32Array(an.fftSize); this.running=true;
+            const tick = () => {
+              if (!this.running) return;
+              an.getFloatTimeDomainData(buf);
+              let sum=0; for (let i=0;i<buf.length;i++){ const x=buf[i]; sum+=x*x; }
+              const rms = Math.sqrt(sum/buf.length);
+              const atk = Math.exp(-1/Math.max(1,this.opt.attackMs)), rel = Math.exp(-1/Math.max(1,this.opt.releaseMs));
+              const env = rms > this.prev ? atk*this.prev + (1-atk)*rms : rel*this.prev + (1-rel)*rms; this.prev = env;
+              let n = Math.max(0, env - this.opt.floor) / Math.max(1e-6,(1 - this.opt.floor));
+              if (this.opt.gamma && this.opt.gamma !== 1) n = Math.pow(n, this.opt.gamma);
+              const y = Math.min(this.opt.max, n * this.opt.gain);
+              try { this.core.setParameterValueById(this.opt.paramId, y); } catch {}
+              this.raf = requestAnimationFrame(tick);
+            };
+            this.raf = requestAnimationFrame(tick);
+          }
+          stop(){
+            this.running=false; if(this.raf) cancelAnimationFrame(this.raf); this.raf=0;
+            try{ this.src?.disconnect(); this.hp?.disconnect(); this.lp?.disconnect(); this.an?.disconnect(); }catch{}
+            this.src=this.hp=this.lp=this.an=null;
+            try{ this.core.setParameterValueById(this.opt.paramId, this.restoreTo); }catch{}
+          }
+        }
+        const mouthDriver = new MouthAmplitudeDriver(core);
+
+        // ---------- Emotion layer (hard-wired mapping) ----------
+        function clamp01(x){ return Math.min(1, Math.max(0, x)); }
+        function lerp(a,b,t){ return a + (b-a) * t; }
+
+        function makeEmotionApplier(core) {
+          const affected = [
+            'ParamEyeLSmile','ParamEyeRSmile','ParamMouthForm',
+            'Param250','Param254','Param251','Param252','Param255','Param258',
+            'Param48','Param47','ParamEyeLOpen','ParamEyeROpen'
+          ];
+          const startVals = new Map();
+
+          function snapshotStart() {
+            startVals.clear();
+            affected.forEach(id => {
+              try { startVals.set(id, core.getParameterValueById(id) ?? 0); } catch {}
+            });
+          }
+
+          function targets(e) {
+            const H = clamp01(e.happiness||0);
+            const C = clamp01(e.confused||0);
+            const A = clamp01(e.annoyed||0);
+            const G = clamp01(e.angry||0);
+            const S = clamp01(e.sad||0);
+
+            const t = {};
+            // happiness
+            t.ParamEyeLSmile = H; t.ParamEyeRSmile = H;
+            t.ParamMouthForm = lerp(0, 0.45, H);
+            t.Param255 = lerp(0, 0.6, H);
+            t.Param258 = lerp(0, 0.35, H);
+
+            // confused
+            t.Param250 = lerp(0, 1.0, C);
+            t.Param48  = lerp(0, 0.5, C);
+
+            // annoyed
+            t.Param251 = lerp(0, 0.8, A);
+            t.Param47  = (t.Param47 ?? 0) + lerp(0, -0.25, A);
+
+            // angry
+            t.Param252 = lerp(0, 1.0, G);
+            t.Param47  = (t.Param47 ?? 0) + lerp(0, -0.55, G);
+
+            // sad
+            t.ParamEyeLOpen = clamp01((startVals.get('ParamEyeLOpen') ?? 1) * (1 - 0.8*S));
+            t.ParamEyeROpen = clamp01((startVals.get('ParamEyeROpen') ?? 1) * (1 - 0.8*S));
+            t.ParamMouthForm = (t.ParamMouthForm ?? 0) + lerp(0, -0.35, S);
+            return t;
+          }
+
+          let raf = 0, stopped = true;
+          function animateTo(map, ms=260){
+            const keys = Object.keys(map);
+            const from = new Map(); keys.forEach(k => from.set(k, startVals.get(k) ?? core.getParameterValueById(k) ?? 0));
+            const to   = new Map(); keys.forEach(k => to.set(k, map[k]));
+            const t0 = performance.now(); stopped=false;
+
+            const tick = now => {
+              if (stopped) return;
+              const k = Math.min(1, (now - t0)/ms);
+              keys.forEach(id => {
+                const a = from.get(id), b = to.get(id);
+                const v = a + (b - a) * (k*(2-k));
+                try { core.setParameterValueById(id, v); } catch {}
+              });
+              if (k < 1) raf = requestAnimationFrame(tick);
+            };
+            raf = requestAnimationFrame(tick);
+          }
+
+          return {
+            apply(emotions) {
+              snapshotStart();
+              animateTo(targets(emotions), 260);
+            },
+            clear() {
+              if (raf) cancelAnimationFrame(raf); raf=0; stopped=true;
+              startVals.forEach((v,id) => { try { core.setParameterValueById(id, v); } catch {} });
+            }
+          };
+        }
+        const emotionLayer = makeEmotionApplier(core);
+
+        // ---------- helpers: base64 → Blob URL ----------
+        function base64ToBlobUrl(base64, mime) {
+          const bin = atob(base64), len = bin.length, bytes = new Uint8Array(len);
+          for (let i=0;i<len;i++) bytes[i] = bin.charCodeAt(i);
+          const blob = new Blob([bytes], { type: mime || 'audio/mpeg' });
+          return URL.createObjectURL(blob);
+        }
+
+        // ---------- Speech pipeline ----------
+        let currentSpeechAnim = null;
+
+        async function speakAndAnimate({ text, voice, baseUrl }) {
+          if (currentSpeechAnim?.cancel) { try { currentSpeechAnim.cancel(); } catch {} }
+          currentSpeechAnim = null;
+
+          // pre-speech snapshot for full restoration
+          const preSpeechSnapshot = snapshotParams(core);
+          const preMouth = preSpeechSnapshot.get('ParamMouthOpenY') ?? 0;
+
+          setStatus('Synthesizing (Azure)…');
+          const ttsRes = await postJson(`${baseUrl}/tts`, { text, voice, format: 'mp3' });
+          if (!ttsRes?.audioBase64) throw new Error('Empty TTS audio');
+          const url = base64ToBlobUrl(ttsRes.audioBase64, ttsRes.mime || 'audio/mpeg');
+
+          // get emotion mix for the text
+          setStatus('Getting emotions…');
+          let emotions = { happiness:0, confused:0, annoyed:0, angry:0, sad:0 };
+          try { emotions = await postJson(`${baseUrl}/emotion`, { text }); } catch (e) { console.warn('emotion fail', e); }
+
+          setStatus('Planning expressions…');
+          await ensureCatalog();
+          const plan = await postJson(`${baseUrl}/live2d_timeline`, {
+            words: ttsRes.words || [],
+            visemes: ttsRes.visemes || [],
+            fps: 60,
+            parameterCatalog: catalogText
+          });
+
+          const audio = new Audio();
+          audio.preload = 'auto'; audio.crossOrigin = 'anonymous'; audio.src = url;
+
+          const playPlan = () => {
+            if (plan?.mode === 'fixed_fps') return playFixedFpsTimeline(core, plan);
+            if (plan?.mode === 'keyframes') return playKeyframesTimeline(core, plan);
+            return () => {};
+          };
+
+          const smoothRestore = () => {
+            try { currentSpeechAnim?.cancel?.(); } catch {}
+            currentSpeechAnim = null;
+            emotionLayer.clear();
+            mouthDriver.stop();
+            tweenToSnapshot(core, preSpeechSnapshot, {
+              duration: 420,
+              easing: t => t*(2-t),
+              onDone: () => setStatus('Idle')
+            });
+          };
+
+          audio.addEventListener('playing', async () => {
+            try { await mouthDriver.ensureContext(); await mouthDriver.startFor(audio, preMouth); } catch {}
+            try { emotionLayer.apply(emotions); } catch {}
+          }, { once:true });
+
+          audio.addEventListener('ended', () => {
+            URL.revokeObjectURL(url);
+            smoothRestore();
+          }, { once:true });
+
+          // start timeline first so timing aligns from t=0
+          const cancelAnim = playPlan();
+          currentSpeechAnim = { cancel: cancelAnim };
+
+          setStatus('Playing…');
+          try {
+            await mouthDriver.ensureContext();
+            await audio.play();
+          } catch (e) {
+            console.error('audio.play failed; user gesture required?', e);
+            setStatus('Audio blocked: click "Say it" again');
+          }
+        }
+
+        // ---------- UI ----------
+        $('#sayBtn').onclick = async () => {
+          const text = $('#sayText').value.trim(); if (!text) return;
+          const voice = $('#voice').value.trim() || 'en-US-JennyNeural';
+          const baseUrl = $('#backendUrl').value.trim() || 'http://localhost:8787';
+          try { await speakAndAnimate({ text, voice, baseUrl }); }
+          catch (e) { console.error(e); setStatus('TTS/Planner failed: ' + e.message); }
+        };
+        $('#stopBtn').onclick = () => {
+          try { currentSpeechAnim?.cancel?.(); } catch {}
+          currentSpeechAnim = null; emotionLayer.clear(); mouthDriver.stop(); setStatus('Stopped');
+        };
+        $('#recenterBtn').onclick = () => fitModel();
+
+        setStatus('Idle');
+      })();
+    </script>
+  </body>
+</html>
+

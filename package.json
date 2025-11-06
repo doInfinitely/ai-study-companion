@@ -6,18 +6,26 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server.mjs",
+    "start": "concurrently \"npm run server\" \"npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\""
   },
   "devDependencies": {
+    "concurrently": "^9.2.1",
     "typescript": "~5.9.3",
     "vite": "^7.1.12"
   },
   "dependencies": {
+    "@llamaindex/openai": "^0.4.21",
+    "@vscode/vscode-languagedetection": "^1.0.22",
     "body-parser": "^2.2.0",
+    "chromadb": "^3.1.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "llamaindex": "^0.12.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.46.0",
+    "multer": "^2.0.2",
     "openai": "^6.8.1",
     "pixi-live2d-display": "^0.4.0"
   }

@@ -2,17 +2,194 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import multer from 'multer';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let dotenvLoaded = false;
 try { await import('dotenv/config'); dotenvLoaded = true; } catch {}
 
 import sdk from 'microsoft-cognitiveservices-speech-sdk';
 import OpenAI from 'openai';
+import { Document, VectorStoreIndex, Settings } from 'llamaindex';
+import { OpenAIEmbedding, OpenAI as OpenAILLM } from '@llamaindex/openai';
 
 // ---------------------- Express setup ----------------------
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '2mb' }));
+
+// Multer for file uploads
+const upload = multer({ dest: 'uploads/' });
+
+// ---------------------- Data Storage ----------------------
+const DATA_DIR = path.join(__dirname, 'data');
+const CONVERSATIONS_DIR = path.join(DATA_DIR, 'conversations');
+
+// Ensure directories exist
+await fs.mkdir(CONVERSATIONS_DIR, { recursive: true });
+
+// In-memory conversation store (in production, use a database)
+const conversations = new Map();
+
+// Vector store for context retrieval
+let vectorIndex = null;
+
+async function initVectorStore() {
+  console.log('📚 Initializing vector store...');
+  try {
+    // Configure LlamaIndex to use OpenAI embeddings and LLM
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (apiKey) {
+      Settings.embedModel = new OpenAIEmbedding({
+        apiKey: apiKey,
+        model: 'text-embedding-3-small' // OpenAI's efficient embedding model
+      });
+      Settings.llm = new OpenAILLM({
+        apiKey: apiKey,
+        model: 'gpt-4o-mini' // Use same model as chat
+      });
+      console.log('  ✓ Configured OpenAI embedding model and LLM');
+    } else {
+      console.error('  ✗ OPENAI_API_KEY not found, cannot initialize embeddings');
+      return;
+    }
+    // Load existing conversations into vector store
+    const conversationFiles = await fs.readdir(CONVERSATIONS_DIR).catch(() => []);
+    const documents = [];
+    
+    console.log(`  Found ${conversationFiles.length} files in conversations directory`);
+    
+    for (const file of conversationFiles) {
+      if (!file.endsWith('.json')) continue;
+      const filePath = path.join(CONVERSATIONS_DIR, file);
+      const data = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+      
+      // Create documents from messages
+      if (data.messages && data.messages.length > 0) {
+        const text = data.messages
+          .map(m => `${m.role}: ${m.content}`)
+          .join('\n\n');
+        
+        documents.push(
+          new Document({
+            text,
+            metadata: {
+              conversationId: data.id,
+              title: data.title,
+              createdAt: data.createdAt
+            }
+          })
+        );
+        console.log(`  ✓ Loaded: ${data.title} (${data.messages.length} messages)`);
+      }
+    }
+    
+    if (documents.length > 0) {
+      console.log(`  Creating vector index from ${documents.length} documents...`);
+      vectorIndex = await VectorStoreIndex.fromDocuments(documents);
+      console.log(`✅ Vector store initialized successfully with ${documents.length} conversations`);
+    } else {
+      console.log('⚠️ No existing conversations to load into vector store');
+    }
+  } catch (err) {
+    console.error('❌ Failed to initialize vector store:', err);
+    console.error('  Error details:', err.message);
+    console.error('  Stack:', err.stack);
+  }
+}
+
+// Load conversations from disk
+async function loadConversations() {
+  try {
+    const files = await fs.readdir(CONVERSATIONS_DIR).catch(() => []);
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      const filePath = path.join(CONVERSATIONS_DIR, file);
+      const data = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+      conversations.set(data.id, data);
+    }
+    console.log(`Loaded ${conversations.size} conversations`);
+  } catch (err) {
+    console.error('Failed to load conversations:', err);
+  }
+}
+
+async function saveConversation(conversation) {
+  const filePath = path.join(CONVERSATIONS_DIR, `${conversation.id}.json`);
+  await fs.writeFile(filePath, JSON.stringify(conversation, null, 2));
+  conversations.set(conversation.id, conversation);
+}
+
+// Initialize on startup
+await loadConversations();
+await initVectorStore();
+
+// ---------------------- AI Study Companion System Prompt ----------------------
+const STUDY_COMPANION_SYSTEM_PROMPT = `You are an AI Study Companion - a persistent, supportive learning assistant designed to help students achieve their educational goals and stay motivated across multiple tutoring sessions.
+
+**Your Core Mission:**
+- Build a continuous relationship with students across sessions
+- Track their learning progress and identify patterns
+- Provide adaptive practice and answer questions conversationally
+- Drive engagement and reduce churn through proactive suggestions
+- Know when to guide students back to human tutors for complex topics
+
+**Key Responsibilities:**
+
+1. **Retention Enhancement:**
+   - When a student completes their goal, suggest related subjects to maintain engagement
+   - Examples:
+     * SAT complete → suggest college essays, study skills, AP prep
+     * Chemistry mastery → suggest physics, other STEM subjects
+     * Math goal achieved → offer advanced topics or related subjects
+   - Address the 52% "goal achieved" churn by always having next steps
+
+2. **Proactive Engagement:**
+   - Nudge students who have <3 sessions by Day 7 to book their next session
+   - Show enthusiasm for their progress and celebrate small wins
+   - Track multi-goal progress, not just single subjects
+   - Remind students of upcoming practice or sessions
+
+3. **Adaptive Learning:**
+   - Remember previous lessons and build on them
+   - Identify knowledge gaps and suggest targeted practice
+   - Adjust difficulty based on student performance
+   - Provide examples relevant to student's context and interests
+
+4. **When to Escalate to Human Tutors:**
+   - Complex topics requiring deep explanation
+   - Student showing persistent confusion or frustration
+   - Topics outside your knowledge domain
+   - Emotional support needs beyond your capacity
+   - Strategic planning for college applications or career paths
+
+**Conversation Style:**
+- Warm, encouraging, and conversational
+- Use student's name when known
+- Ask clarifying questions to understand their needs
+- Celebrate progress and normalize struggle
+- Be concise but thorough
+- Use emojis sparingly to add warmth
+
+**Context Awareness:**
+- You have access to past conversation history through a vector store
+- Reference previous topics and progress when relevant
+- Build on earlier conversations naturally
+- Track goals, subjects, and milestones across sessions
+
+**Response Format:**
+- Keep responses focused and actionable
+- Break down complex topics into digestible pieces
+- Offer specific next steps or practice suggestions
+- Always end with a question or prompt to continue engagement
+
+Remember: Your goal is to be a persistent companion that makes learning feel continuous, supported, and achievable. You're not replacing human tutors - you're the bridge between sessions that keeps students engaged and progressing.`;
 
 // ---------------------- Helpers ----------------------
 function parseCatalog(txt) {
@@ -121,6 +298,332 @@ function ok(res, json) { return res.status(200).json(json); }
 function fail(res, status, message, details) {
   return res.status(status).json({ error: 'TTS_ERROR', message, details });
 }
+
+// ---------------------- Conversation Management Endpoints ----------------------
+
+app.post('/conversations/create', async (req, res) => {
+  try {
+    const conversation = {
+      id: randomUUID(),
+      title: 'New Conversation',
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {
+        sessionCount: 0,
+        goals: [],
+        subjects: []
+      }
+    };
+    
+    await saveConversation(conversation);
+    res.json({ conversationId: conversation.id });
+  } catch (err) {
+    console.error('Failed to create conversation:', err);
+    res.status(500).json({ error: 'Failed to create conversation' });
+  }
+});
+
+app.post('/conversations/list', async (req, res) => {
+  try {
+    const conversationList = Array.from(conversations.values())
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+      .map(c => ({
+        id: c.id,
+        title: c.title,
+        updatedAt: c.updatedAt,
+        messageCount: c.messages?.length || 0
+      }));
+    
+    res.json({ conversations: conversationList });
+  } catch (err) {
+    console.error('Failed to list conversations:', err);
+    res.status(500).json({ error: 'Failed to list conversations' });
+  }
+});
+
+app.post('/conversations/get', async (req, res) => {
+  try {
+    const { conversationId } = req.body;
+    const conversation = conversations.get(conversationId);
+    
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    res.json({
+      id: conversation.id,
+      title: conversation.title,
+      messages: conversation.messages,
+      metadata: conversation.metadata
+    });
+  } catch (err) {
+    console.error('Failed to get conversation:', err);
+    res.status(500).json({ error: 'Failed to get conversation' });
+  }
+});
+
+// ---------------------- Chat Endpoints ----------------------
+
+async function getRelevantContext(query, conversationId, limit = 3) {
+  if (!vectorIndex) {
+    console.log('⚠️ Vector index not initialized');
+    return [];
+  }
+  
+  try {
+    console.log(`🔍 Querying vector store for: "${query.substring(0, 50)}..."`);
+    
+    // Use retriever instead of query engine (we just want docs, not a synthesized response)
+    const retriever = vectorIndex.asRetriever({ similarityTopK: limit + 2 }); // Get extra in case we filter out current conversation
+    const nodes = await retriever.retrieve(query);
+    
+    console.log(`  Found ${nodes?.length || 0} nodes`);
+    
+    // Extract relevant context from other conversations
+    const contexts = [];
+    if (nodes) {
+      for (const nodeWithScore of nodes) {
+        const metadata = nodeWithScore.node?.metadata || {};
+        const text = nodeWithScore.node?.text || nodeWithScore.node?.getContent?.() || '';
+        
+        console.log(`  - Node from conversation: ${metadata.title} (${metadata.conversationId})`);
+        
+        if (metadata.conversationId !== conversationId) {
+          contexts.push({
+            text: text,
+            conversationId: metadata.conversationId,
+            title: metadata.title,
+            score: nodeWithScore.score
+          });
+          console.log(`    ✓ Added context from: ${metadata.title} (score: ${nodeWithScore.score?.toFixed(3)})`);
+          
+          // Stop once we have enough contexts from other conversations
+          if (contexts.length >= limit) break;
+        } else {
+          console.log(`    ✗ Skipped (same conversation)`);
+        }
+      }
+    }
+    
+    console.log(`  📦 Returning ${contexts.length} relevant contexts`);
+    return contexts;
+  } catch (err) {
+    console.error('❌ Failed to retrieve context:', err);
+    console.error('  Error details:', err.message);
+    return [];
+  }
+}
+
+app.post('/chat/message', async (req, res) => {
+  try {
+    const { conversationId, message, isInitial = false } = req.body;
+    
+    if (!conversationId) {
+      return res.status(400).json({ error: 'conversationId required' });
+    }
+    
+    const conversation = conversations.get(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    // Get relevant context from past conversations
+    const contexts = await getRelevantContext(
+      isInitial ? 'introduction welcome first conversation' : message,
+      conversationId
+    );
+    
+    // Build context string
+    let contextString = '';
+    if (contexts.length > 0) {
+      contextString = '\n\n**Relevant context from past conversations:**\n' +
+        contexts.map(c => `- ${c.text.substring(0, 200)}...`).join('\n');
+    }
+    
+    // Build messages for OpenAI
+    const messages = [
+      { role: 'system', content: STUDY_COMPANION_SYSTEM_PROMPT + contextString }
+    ];
+    
+    // Add conversation history
+    messages.push(...conversation.messages);
+    
+    // Handle initial greeting
+    if (isInitial) {
+      messages.push({
+        role: 'user',
+        content: 'Please introduce yourself as my AI Study Companion. Be warm, welcoming, and explain how you can help me with my learning journey.'
+      });
+    } else {
+      messages.push({ role: 'user', content: message });
+      conversation.messages.push({ role: 'user', content: message });
+    }
+    
+    // Call OpenAI
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages,
+      temperature: 0.7,
+      max_tokens: 500
+    });
+    
+    const response = completion.choices[0].message.content;
+    
+    // Save assistant response
+    conversation.messages.push({ role: 'assistant', content: response });
+    conversation.updatedAt = new Date().toISOString();
+    
+    // Generate smart title from first user message (after initial greeting)
+    console.log('=== TITLE GENERATION CHECK ===');
+    console.log(`  messages.length: ${conversation.messages.length}`);
+    console.log(`  isInitial: ${isInitial}`);
+    console.log(`  currentTitle: "${conversation.title}"`);
+    console.log(`  message content: "${message}"`);
+    
+    // Check if this is the first real user message (after greeting)
+    const isFirstUserMessage = !isInitial && conversation.title === 'New Conversation';
+    console.log(`  isFirstUserMessage: ${isFirstUserMessage}`);
+    
+    if (isFirstUserMessage) {
+      console.log('✓ GENERATING conversation title from user message...');
+      try {
+        const titleCompletion = await openai.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [
+            { 
+              role: 'system', 
+              content: 'Generate a short, descriptive title (max 5 words) for this conversation based on the user\'s first message. Just return the title, nothing else.' 
+            },
+            { role: 'user', content: message }
+          ],
+          temperature: 0.7,
+          max_tokens: 20
+        });
+        
+        const generatedTitle = titleCompletion.choices[0].message.content.trim();
+        conversation.title = generatedTitle.substring(0, 60);
+        console.log(`✓✓✓ TITLE GENERATED: "${conversation.title}"`);
+      } catch (err) {
+        console.warn('Failed to generate title, using fallback:', err.message);
+        conversation.title = message.substring(0, 50) + (message.length > 50 ? '...' : '');
+        console.log(`✓✓✓ FALLBACK TITLE: "${conversation.title}"`);
+      }
+    } else {
+      console.log('✗ NOT generating title');
+      console.log(`  Reason: isInitial=${isInitial}, title="${conversation.title}"`);
+    }
+    console.log('=== END TITLE CHECK ===');
+    
+    await saveConversation(conversation);
+    
+    // Update vector store with new messages
+    if (vectorIndex && conversation.messages.length > 0) {
+      try {
+        const text = conversation.messages
+          .slice(-2) // Just the latest exchange
+          .map(m => `${m.role}: ${m.content}`)
+          .join('\n\n');
+        
+        console.log(`📝 Updating vector store with new messages from "${conversation.title}"`);
+        
+        const doc = new Document({
+          text,
+          metadata: {
+            conversationId: conversation.id,
+            title: conversation.title,
+            createdAt: conversation.createdAt
+          }
+        });
+        
+        await vectorIndex.insert(doc);
+        console.log('  ✓ Vector store updated successfully');
+      } catch (err) {
+        console.error('❌ Failed to update vector store:', err);
+        console.error('  Error details:', err.message);
+      }
+    } else if (!vectorIndex) {
+      console.log('⚠️ Vector index not available for update');
+    }
+    
+    res.json({ 
+      response,
+      conversationTitle: conversation.title // Return the updated title
+    });
+  } catch (err) {
+    console.error('Chat error:', err);
+    res.status(500).json({ error: 'Failed to process message', details: err.message });
+  }
+});
+
+// ---------------------- Whisper Transcription ----------------------
+
+app.post('/chat/transcribe', upload.single('audio'), async (req, res) => {
+  let filePath = null;
+  let renamedPath = null;
+  
+  try {
+    if (!req.file) {
+      console.error('No file in request');
+      return res.status(400).json({ error: 'No audio file provided' });
+    }
+    
+    filePath = req.file.path;
+    console.log(`Received audio file: ${req.file.originalname}, size: ${req.file.size} bytes, mimetype: ${req.file.mimetype}`);
+    
+    // Determine proper extension based on mimetype
+    let extension = '.webm';
+    if (req.file.mimetype) {
+      if (req.file.mimetype.includes('webm')) extension = '.webm';
+      else if (req.file.mimetype.includes('ogg')) extension = '.ogg';
+      else if (req.file.mimetype.includes('mp4')) extension = '.mp4';
+      else if (req.file.mimetype.includes('mpeg')) extension = '.mpeg';
+      else if (req.file.mimetype.includes('mp3')) extension = '.mp3';
+      else if (req.file.mimetype.includes('wav')) extension = '.wav';
+    }
+    
+    // Rename file to have proper extension for Whisper
+    renamedPath = filePath + extension;
+    await fs.rename(filePath, renamedPath);
+    
+    console.log(`Renamed to: ${extension}, sending to Whisper API...`);
+    
+    // Use createReadStream for OpenAI SDK
+    const { createReadStream } = await import('fs');
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: createReadStream(renamedPath),
+      model: 'whisper-1',
+      language: 'en'
+    });
+    
+    console.log('Transcription successful:', transcription.text);
+    res.json({ text: transcription.text });
+  } catch (err) {
+    console.error('Transcription error:', err);
+    console.error('Error details:', err.message);
+    if (err.response) {
+      console.error('API response:', err.response.data);
+    }
+    res.status(500).json({ 
+      error: 'Failed to transcribe audio', 
+      details: err.message,
+      type: err.type || 'unknown'
+    });
+  } finally {
+    // Clean up uploaded files
+    if (filePath) {
+      try {
+        await fs.unlink(filePath).catch(() => {});
+      } catch {}
+    }
+    if (renamedPath) {
+      try {
+        await fs.unlink(renamedPath).catch(() => {});
+      } catch {}
+    }
+  }
+});
 
 // ---------------------- Health & voices ----------------------
 app.get('/health', (req, res) => {
