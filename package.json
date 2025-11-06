@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@llamaindex/openai": "^0.4.21",
+    "@supabase/auth-helpers-shared": "^0.7.0",
+    "@supabase/supabase-js": "^2.79.0",
     "@vscode/vscode-languagedetection": "^1.0.22",
     "body-parser": "^2.2.0",
     "chromadb": "^3.1.1",
@@ -24,6 +26,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "llamaindex": "^0.12.0",
+    "marked": "^16.4.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.46.0",
     "multer": "^2.0.2",
     "openai": "^6.8.1",

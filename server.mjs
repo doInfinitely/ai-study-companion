@@ -188,6 +188,12 @@ const STUDY_COMPANION_SYSTEM_PROMPT = `You are an AI Study Companion - a persist
 - Break down complex topics into digestible pieces
 - Offer specific next steps or practice suggestions
 - Always end with a question or prompt to continue engagement
+- Use markdown formatting for better readability:
+  * Use **bold** for emphasis and key terms
+  * Use bullet points and numbered lists for clarity
+  * Use code blocks (\`\`\`) for formulas, equations, or code examples
+  * Use headings (##) to organize longer responses
+  * Use > blockquotes for important callouts or tips
 
 Remember: Your goal is to be a persistent companion that makes learning feel continuous, supported, and achievable. You're not replacing human tutors - you're the bridge between sessions that keeps students engaged and progressing.`;
 
@@ -465,7 +471,7 @@ app.post('/chat/message', async (req, res) => {
       model: 'gpt-4o-mini',
       messages,
       temperature: 0.7,
-      max_tokens: 500
+      max_tokens: 2000 // Increased for longer, more detailed responses
     });
     
     const response = completion.choices[0].message.content;
