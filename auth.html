@@ -262,6 +262,8 @@
       <button type="submit" class="btn" id="signupBtn">Create Account</button>
     </form>
 
+    <!-- OAuth buttons temporarily disabled - configure in Supabase first -->
+    <!--
     <div class="divider">
       <span>or continue with</span>
     </div>
@@ -282,6 +284,7 @@
       </svg>
       GitHub
     </button>
+    -->
   </div>
 
   <script type="module">
@@ -374,7 +377,8 @@
       }
     });
 
-    // OAuth buttons
+    // OAuth buttons (disabled for now)
+    /*
     document.getElementById('googleBtn').addEventListener('click', async () => {
       try {
         await signInWithProvider('google');
@@ -390,6 +394,7 @@
         showMessage(error.message);
       }
     });
+    */
 
     // Forgot password (placeholder)
     document.getElementById('forgotPasswordLink').addEventListener('click', (e) => {

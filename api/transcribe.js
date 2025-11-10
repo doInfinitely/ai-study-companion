@@ -1,6 +1,8 @@
-import { OpenAI } from 'openai';
+import { OpenAI, toFile } from 'openai';
 import formidable from 'formidable';
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 export const config = {
   api: {
@@ -20,10 +22,14 @@ export default async function handler(req, res) {
   console.log('📝 Transcription request received');
 
   try {
-    // Parse form data with formidable
+    // Configure formidable to use /tmp directory (required for Vercel)
+    const uploadDir = os.tmpdir();
+    console.log('Upload directory:', uploadDir);
+
     const form = formidable({
       maxFileSize: 25 * 1024 * 1024, // 25MB
       keepExtensions: true,
+      uploadDir: uploadDir,
     });
 
     const [fields, files] = await new Promise((resolve, reject) => {
@@ -49,25 +55,41 @@ export default async function handler(req, res) {
       filepath: audioFile.filepath,
     });
 
-    // Create a read stream from the temporary file
-    const audioStream = fs.createReadStream(audioFile.filepath);
-    audioStream.path = audioFile.originalFilename || 'audio.webm';
+    // Verify file exists
+    if (!fs.existsSync(audioFile.filepath)) {
+      throw new Error(`File not found at ${audioFile.filepath}`);
+    }
+
+    // Read the file as a buffer
+    const fileBuffer = fs.readFileSync(audioFile.filepath);
+    
+    // Create a proper filename with extension
+    const extension = audioFile.originalFilename?.split('.').pop() || 'webm';
+    const filename = `audio.${extension}`;
+    
+    // Convert buffer to File using OpenAI's helper
+    const file = await toFile(fileBuffer, filename, { type: audioFile.mimetype || 'audio/webm' });
 
     console.log('🔊 Sending to OpenAI Whisper...');
 
     const transcription = await openai.audio.transcriptions.create({
-      file: audioStream,
+      file: file,
       model: 'whisper-1',
     });
 
     console.log('✅ Transcription successful:', transcription.text.substring(0, 50) + '...');
 
     // Clean up temp file
-    fs.unlinkSync(audioFile.filepath);
+    try {
+      fs.unlinkSync(audioFile.filepath);
+    } catch (cleanupError) {
+      console.warn('Failed to cleanup temp file:', cleanupError);
+    }
 
     res.status(200).json({ text: transcription.text });
   } catch (error) {
     console.error('❌ Transcription error:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ 
       error: 'Failed to transcribe audio',
       details: error.message 
