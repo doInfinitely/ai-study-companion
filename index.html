@@ -1619,6 +1619,11 @@
       // Save customization to database
       let saveCustomizationTimeout;
       async function saveCustomization() {
+        if (!currentUserId) {
+          console.warn('Cannot save customization: user not logged in');
+          return;
+        }
+        
         const customization = {};
         Object.keys(customizationParams).forEach(key => {
           const input = document.getElementById(key);
@@ -1632,7 +1637,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
-              userId: currentUser.id, 
+              userId: currentUserId, 
               customization 
             }),
           });
@@ -1652,8 +1657,13 @@
       
       // Load customization from database
       async function loadCustomization() {
+        if (!currentUserId) {
+          console.warn('Cannot load customization: user not logged in');
+          return;
+        }
+        
         try {
-          const response = await fetch(`${API_BASE}/preferences?userId=${currentUser.id}`);
+          const response = await fetch(`${API_BASE}/preferences?userId=${currentUserId}`);
           if (!response.ok) throw new Error('Failed to load customization');
           
           const data = await response.json();
