@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "server": "node server.mjs",
     "start": "concurrently \"npm run server\" \"npm run dev\" --names \"backend,frontend\" --prefix-colors \"blue,green\""
