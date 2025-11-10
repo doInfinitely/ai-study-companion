@@ -1616,6 +1616,80 @@
         rightHairWidth: { id: 'Param135', range: [-1, 1] }
       };
       
+      // Save customization to database
+      let saveCustomizationTimeout;
+      async function saveCustomization() {
+        const customization = {};
+        Object.keys(customizationParams).forEach(key => {
+          const input = document.getElementById(key);
+          if (input) {
+            customization[key] = parseFloat(input.value);
+          }
+        });
+        
+        try {
+          const response = await fetch(`${API_BASE}/preferences`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              userId: currentUser.id, 
+              customization 
+            }),
+          });
+          
+          if (!response.ok) throw new Error('Failed to save customization');
+          console.log('✅ Customization saved');
+        } catch (error) {
+          console.error('Failed to save customization:', error);
+        }
+      }
+      
+      // Debounced save (waits 1 second after last change)
+      function saveCustomizationDebounced() {
+        clearTimeout(saveCustomizationTimeout);
+        saveCustomizationTimeout = setTimeout(saveCustomization, 1000);
+      }
+      
+      // Load customization from database
+      async function loadCustomization() {
+        try {
+          const response = await fetch(`${API_BASE}/preferences?userId=${currentUser.id}`);
+          if (!response.ok) throw new Error('Failed to load customization');
+          
+          const data = await response.json();
+          const customization = data.customization || {};
+          
+          console.log('📥 Loading customization:', customization);
+          
+          // Apply saved values to sliders and model
+          const core = live2dController?.core;
+          if (!core) return;
+          
+          Object.keys(customization).forEach(key => {
+            const value = customization[key];
+            const input = document.getElementById(key);
+            const valueDisplay = document.getElementById(key + 'Value');
+            const param = customizationParams[key];
+            
+            if (input && valueDisplay && param) {
+              input.value = value;
+              const step = parseFloat(input.step) || 1;
+              const decimals = step < 1 ? 1 : 0;
+              valueDisplay.textContent = value.toFixed(decimals);
+              
+              try {
+                core.setParameterValueById(param.id, value);
+                console.log(`✓ Restored ${param.id} to ${value}`);
+              } catch (err) {
+                console.warn(`✗ Failed to restore ${param.id}:`, err);
+              }
+            }
+          });
+        } catch (error) {
+          console.error('Failed to load customization:', error);
+        }
+      }
+      
       function setupCustomization() {
         if (!live2dController || !live2dController.core) {
           console.error('Live2D controller not ready for customization');
@@ -1685,6 +1759,9 @@
                   console.log(`✓ Synced ${syncParam.id} to ${value}`);
                 }
               }
+              
+              // Auto-save customization (debounced)
+              saveCustomizationDebounced();
             } catch (err) {
               console.error(`✗ Failed to set ${param.id} to ${value}:`, err);
             }
@@ -1712,9 +1789,15 @@
               console.warn(`Failed to reset ${param.id}:`, err);
             }
           });
+          
+          // Save the reset state
+          saveCustomization();
         };
         
         console.log('Customization controls initialized');
+        
+        // Load saved customization from database
+        loadCustomization();
       }
       
       // Audio unlock for browsers with autoplay restrictions
