@@ -890,8 +890,8 @@
       
       // Initialize Supabase
       const supabase = createClient(
-        'YOUR_SUPABASE_URL', // Will be replaced in deployment
-        'YOUR_SUPABASE_ANON_KEY' // Will be replaced in deployment
+        import.meta.env.VITE_SUPABASE_URL || 'YOUR_SUPABASE_URL',
+        import.meta.env.VITE_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY'
       );
       
       // Main chat application
