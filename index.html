@@ -64,6 +64,24 @@
         background: var(--accent-hover);
       }
       
+      .logout-btn {
+        width: 100%;
+        padding: 8px 12px;
+        margin-top: 8px;
+        background: transparent;
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .logout-btn:hover {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+      
       .conversation-list {
         flex: 1;
         overflow-y: auto;
@@ -622,6 +640,7 @@
       <div class="sidebar">
         <div class="sidebar-header">
           <button class="new-chat-btn" id="newChatBtn">+ New Conversation</button>
+          <button class="logout-btn" id="logoutBtn">🚪 Logout</button>
         </div>
         <div class="conversation-list" id="conversationList">
           <!-- Conversations will be loaded here -->
@@ -855,6 +874,9 @@
     <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
     
     <script type="module">
+      // Import Supabase
+      import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+      
       // Import marked for markdown rendering
       import { marked } from 'https://cdn.jsdelivr.net/npm/marked@11.1.0/lib/marked.esm.js';
       
@@ -866,14 +888,39 @@
         mangle: false, // Don't escape autolinked email addresses
       });
       
+      // Initialize Supabase
+      const supabase = createClient(
+        'YOUR_SUPABASE_URL', // Will be replaced in deployment
+        'YOUR_SUPABASE_ANON_KEY' // Will be replaced in deployment
+      );
+      
       // Main chat application
       let currentConversationId = null;
+      let currentUserId = null;
       let isRecording = false;
       let mediaRecorder = null;
       let audioChunks = [];
       let live2dController = null;
       
-      const API_BASE = 'http://localhost:8787';
+      // Use production API in deployment, local in dev
+      const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8787' : '/api';
+      
+      // Check authentication
+      async function checkAuth() {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          window.location.href = '/auth.html';
+          return false;
+        }
+        currentUserId = user.id;
+        return true;
+      }
+      
+      // Logout function
+      async function logout() {
+        await supabase.auth.signOut();
+        window.location.href = '/auth.html';
+      }
       
       // DOM elements
       const chatMessages = document.getElementById('chatMessages');
@@ -956,9 +1003,12 @@
       
       async function loadConversations() {
         try {
-          const data = await apiRequest('/conversations/list', {});
+          const res = await fetch(`${API_BASE}/conversations?userId=${currentUserId}`);
+          if (!res.ok) throw new Error('Failed to load conversations');
+          const conversations = await res.json();
+          
           conversationList.innerHTML = '';
-          data.conversations.forEach(conv => {
+          conversations.forEach(conv => {
             const item = document.createElement('div');
             item.className = 'conversation-item';
             if (conv.id === currentConversationId) {
@@ -976,8 +1026,15 @@
       
       async function createNewConversation() {
         try {
-          const data = await apiRequest('/conversations/create', {});
-          currentConversationId = data.conversationId;
+          const res = await fetch(`${API_BASE}/conversations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: currentUserId }),
+          });
+          if (!res.ok) throw new Error('Failed to create conversation');
+          const data = await res.json();
+          
+          currentConversationId = data.id;
           await loadConversations();
           chatMessages.innerHTML = '';
           emptyState.style.display = 'flex';
@@ -986,8 +1043,9 @@
           await sendMessage('', true);
           
           // Add a helpful note about audio if this is truly the first conversation
-          const allConversations = await apiRequest('/conversations/list', {});
-          if (allConversations.conversations.length === 1) {
+          const allRes = await fetch(`${API_BASE}/conversations?userId=${currentUserId}`);
+          const allConversations = await allRes.json();
+          if (allConversations.length === 1) {
             setTimeout(() => {
               addMessageToUI('system', 'Tip: If you don\'t hear my voice, click anywhere to enable audio. Some browsers block autoplay.');
             }, 2000);
@@ -999,12 +1057,20 @@
       
       async function loadConversation(conversationId) {
         try {
-          const data = await apiRequest('/conversations/get', { conversationId });
+          const { data, error } = await supabase
+            .from('conversations')
+            .select('*')
+            .eq('id', conversationId)
+            .eq('user_id', currentUserId)
+            .single();
+          
+          if (error) throw error;
+          
           currentConversationId = conversationId;
           chatMessages.innerHTML = '';
           emptyState.style.display = 'none';
           
-          data.messages.forEach(msg => {
+          (data.messages || []).forEach(msg => {
             addMessageToUI(msg.role, msg.content, false);
           });
           
@@ -1039,11 +1105,22 @@
         sendBtn.disabled = true;
         
         try {
-          const data = await apiRequest('/chat/message', {
-            conversationId: currentConversationId,
-            message: text,
-            isInitial
+          const res = await fetch(`${API_BASE}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              conversationId: currentConversationId,
+              message: text || 'Hi! I\'m ready to learn.',
+              userId: currentUserId,
+            }),
           });
+          
+          if (!res.ok) {
+            const error = await res.text();
+            throw new Error(`Chat error: ${error}`);
+          }
+          
+          const data = await res.json();
           
           console.log('=== FRONTEND RESPONSE ===');
           console.log('  data.conversationTitle:', data.conversationTitle);
@@ -1291,31 +1368,44 @@
           const cleanedText = cleanTextForTTS(text);
           if (!cleanedText) return;
           
-          // Get TTS with timing data
-          const ttsData = await apiRequest('/tts', {
-            text: cleanedText,
-            voice: 'en-US-JennyNeural',
-            format: 'mp3'
+          // Get TTS audio
+          const ttsRes = await fetch(`${API_BASE}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: cleanedText }),
           });
           
-          if (!ttsData.audioBase64) return;
+          if (!ttsRes.ok) {
+            console.error('TTS failed');
+            return;
+          }
           
-          // Get emotion scores
-          let emotions = { happiness:0.3, confused:0, annoyed:0, angry:0, sad:0 };
+          const audioBlob = await ttsRes.blob();
+          const url = URL.createObjectURL(audioBlob);
+          
+          // Get emotion
+          let emotionData = { emotion: 'neutral' };
           try {
-            emotions = await apiRequest('/emotion', { text });
+            const emotionRes = await fetch(`${API_BASE}/emotion`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text }),
+            });
+            if (emotionRes.ok) {
+              emotionData = await emotionRes.json();
+            }
           } catch (e) {
             console.warn('Emotion detection failed, using default', e);
           }
           
-          // Convert base64 to blob URL
-          const binary = atob(ttsData.audioBase64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'audio/mpeg' });
-          const url = URL.createObjectURL(blob);
+          const emotions = {
+            happy: emotionData.emotion === 'happy' ? 1.0 : 0.2,
+            sad: emotionData.emotion === 'sad' ? 1.0 : 0.0,
+            angry: emotionData.emotion === 'angry' ? 1.0 : 0.0,
+            surprised: emotionData.emotion === 'surprised' ? 1.0 : 0.0,
+            confused: emotionData.emotion === 'thoughtful' ? 0.5 : 0.0,
+            annoyed: emotionData.emotion === 'angry' ? 0.5 : 0.0,
+          };
           
           const audio = new Audio(url);
           audio.preload = 'auto';
@@ -1428,7 +1518,7 @@
           const formData = new FormData();
           formData.append('audio', audioBlob, 'recording.webm');
           
-          const res = await fetch(`${API_BASE}/chat/transcribe`, {
+          const res = await fetch(`${API_BASE}/transcribe`, {
             method: 'POST',
             body: formData
           });
@@ -1645,6 +1735,13 @@
       
       // Initialize
       (async () => {
+        // Check authentication first
+        const isAuthenticated = await checkAuth();
+        if (!isAuthenticated) return;
+        
+        // Wire up logout button
+        document.getElementById('logoutBtn').addEventListener('click', logout);
+        
         live2dController = await initLive2D();
         
         // Initialize mouth driver and emotion layer
